@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
+python-dotenv
+google-genai
+python-pptx
+pdf2image
+Pillow
+pymupdf
+pyyaml
