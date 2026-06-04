@@ -47,13 +47,31 @@ def _build_picker_prompt(
 ) -> str:
     """Per-slide picker prompt — short, focused, cheap."""
     src_dump = []
+    any_table = False
     for p in sources:
+        has_table = bool(getattr(p, "has_table", False))
+        any_table = any_table or has_table
         src_dump.append({
-            "page":         p.page_number,
-            "content_type": p.content_type.value if hasattr(p.content_type, "value") else str(p.content_type),
-            "main_text":    (p.main_text or "")[:600],
-            "diagrams":     (p.diagrams_described or "")[:200],
+            "page":              p.page_number,
+            "content_type":      p.content_type.value if hasattr(p.content_type, "value") else str(p.content_type),
+            # Keep enough text that a table appearing AFTER intro prose is still
+            # visible to the picker (tables often sit below a paragraph).
+            "main_text":         (p.main_text or "")[:2500],
+            "diagrams":          (p.diagrams_described or "")[:200],
+            "has_table":         has_table,
+            "table_description": getattr(p, "table_description", None) or "",
         })
+
+    table_signal = ""
+    if any_table:
+        table_signal = (
+            "\n⚠️ TABLE SIGNAL: the source page(s) for this slide contain a TABLE "
+            "(see has_table / table_description / the ' | ' pipe-delimited rows in "
+            "main_text). If THIS slide's title/points are about that tabular data, "
+            "you MUST pick table_slide (table only) or theory_table_slide (≤3 "
+            "bullets + small table). Do NOT leave it as theory_slide — a prosified "
+            "table is unreadable.\n"
+        )
 
     return f"""You are a layout reviewer for a teaching slide deck.
 Your job: pick the BEST layout for ONE slide based on its source content.
@@ -62,7 +80,7 @@ Slide #{slide.slide_number} of {deck_size}
 Planner's choice : {slide.template.value}
 Planner's title  : "{slide.title}"
 Planner's points : {json.dumps(slide.key_points, ensure_ascii=False)}
-
+{table_signal}
 Neighbour slides (for flow context):
 {chr(10).join(neighbour_summaries) if neighbour_summaries else "(none)"}
 
@@ -93,13 +111,17 @@ DECISION RULES:
    • otherwise                    → mcq_slide      (or pyq_slide)
    • use pyq_* only if the page mentions a year / exam name explicitly.
 2. If the page is a subjective question with no options → question_only / pyq_question_only.
-3. If the page has a TABLE (rows × columns of values, factors, comparisons):
-   • table only, no surrounding theory                          → table_slide
-   • short paragraph + small table (≤ 6 rows × 5 cols) together → theory_table_slide
-   • long theory next to a big table                            → keep theory_slide
-     (the planner should already have a separate table_slide for the table)
-   Never downgrade a real source table to a plain theory_slide if the layout
-   was already table_slide / theory_table_slide.
+3. TABLE HANDLING — judge by what THIS slide is about, not just the page:
+   • If this slide's title/points are ABOUT the tabular data (e.g. "Discount
+     Factors", "PV Factors", "Comparison Table") AND the source has a table
+     (has_table=true or ' | ' rows in main_text):
+        - table is the whole point, little/no theory needed → table_slide
+        - ≤3 short bullets explain a small table (≤6 rows × 5 cols) → theory_table_slide
+     Pick this with HIGH confidence (≥ 0.85) even if the planner said
+     theory_slide — a prosified table is unreadable and must be fixed.
+   • If this slide is about THEORY/explanation and merely sits on the same page
+     as a table that another slide already covers → keep theory_slide.
+   • Never downgrade a real table slide back to theory_slide.
 4. If the page is mostly definitions, formulas, theory and has NO table → theory_slide.
 5. If the page is just a chapter / section title with little content → section_heading.
 6. NEVER suggest title_slide, thank_you_slide, or summary here.

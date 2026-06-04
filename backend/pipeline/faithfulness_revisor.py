@@ -15,6 +15,15 @@ from schemas.slide_content   import SlideContent
 from schemas.faithfulness    import FaithfulnessReport
 
 
+# MCQ / PYQ option layouts: the bullets ARE the four answer options — atomic
+# question content. Stripping any of them leaves a broken question (the user
+# saw "no options" slides). NEVER strip these; if the critic thinks an answer
+# is wrong it must use fix_action="rewrite" instead.
+_PROTECTED_FROM_STRIP = {
+    "mcq_slide", "mcq_grid_slide", "pyq_slide", "pyq_grid_slide",
+}
+
+
 def apply_strips(
     contents: list[SlideContent],
     reports:  list[FaithfulnessReport],
@@ -33,6 +42,14 @@ def apply_strips(
         r = by_num.get(c.slide_number)
         if r is None or r.fix_action != "strip_bullets":
             out.append(c)
+            continue
+
+        # Never strip MCQ/PYQ options — they are the question's answer set.
+        if c.layout.value in _PROTECTED_FROM_STRIP:
+            out.append(c)
+            log.append(
+                f"slide {c.slide_number}: strip skipped — MCQ/PYQ options protected"
+            )
             continue
 
         drop_idx = {

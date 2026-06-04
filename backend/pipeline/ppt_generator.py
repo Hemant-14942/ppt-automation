@@ -652,12 +652,19 @@ def _set_plain_hanging(paragraph, indent_in: float, hang_in: float):
     etree.SubElement(pPr, qn("a:buNone"))
 
 
+def _is_solution_slide(content: SlideContent) -> bool:
+    """Detect if this theory slide is a solution/worked-example slide."""
+    t = (content.title or "").strip().lower()
+    return t.startswith("solution") and (len(t) < 9 or t[8:9] in (':', ' ', '-', '—'))
+
+
 def _fill_theory_slide(slide, content: SlideContent):
     """
     Theory / concept layout built on top of the blank dark slide (template idx 3).
 
     Layout:
-      - Compact yellow rounded-rect tag at top-left holding the title in black bold.
+      - Compact rounded-rect tag at top-left holding the title in bold.
+        Yellow for normal theory; green (#4CAF50) for solution slides.
         Width auto-fits the title length.
       - Body textbox with arrow (➤) bullets in white. Bullets prefixed with
         "(a) ", "(b) ", "(c) ", "(d) " auto-indent as sub-bullets without arrow.
@@ -671,34 +678,34 @@ def _fill_theory_slide(slide, content: SlideContent):
     from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
     from pptx.enum.shapes import MSO_SHAPE
 
+    is_solution = _is_solution_slide(content)
+
     YELLOW = RGBColor(0xFF, 0xCC, 0x31)
+    GREEN  = RGBColor(0x4C, 0xAF, 0x50)
+    TAG_BG = GREEN if is_solution else YELLOW
     BLACK  = RGBColor(0x10, 0x10, 0x10)
     WHITE  = RGBColor(0xFF, 0xFF, 0xFF)
+    TAG_TEXT = WHITE if is_solution else BLACK
 
     sub_re = re.compile(r'^\(\s*([a-dA-D])\s*\)\s*')
 
-    # ── Title — yellow tag, auto-sized to text ────────────────────────────────
+    # ── Title — colored tag, auto-sized to text ───────────────────────────────
     raw_title = (content.title or "").strip()
-    title = raw_title.upper() if raw_title else "TOPIC"
+    if is_solution:
+        display = raw_title
+        for pfx in ("Solution:", "Solution -", "Solution —", "Solution "):
+            if display.lower().startswith(pfx.lower()):
+                display = "SOLUTION: " + display[len(pfx):].strip().upper()
+                break
+        else:
+            display = raw_title.upper()
+        title = display
+    else:
+        title = raw_title.upper() if raw_title else "TOPIC"
 
-    # Pick a title font size that fits within ~26 in (leaves room for the
-    # top-right PW badge). Use a conservative char-width factor because
-    # rendering engines (LibreOffice in particular) often substitute Anton
-    # with a wider bold sans — under-estimating clips the text.
-    MAX_TAG_W = 26.0
     PAD_X = 0.6
     PAD_Y = 0.20
-    SAFETY = 0.5   # extra width padding so the title never touches the right edge
-    char_w = 0.012
-    for candidate_pt in (72, 64, 56, 48, 42, 36):
-        if len(title) * candidate_pt * char_w <= MAX_TAG_W - 2 * PAD_X - SAFETY:
-            title_pt = candidate_pt
-            break
-    else:
-        title_pt = 36
-    text_w_in = len(title) * title_pt * char_w
-    tag_w = min(MAX_TAG_W, max(text_w_in + 2 * PAD_X + SAFETY, 5.0))
-    tag_h = title_pt / 72.0 + 2 * PAD_Y + 0.35
+    title_pt, tag_w, tag_h = _fit_title_tag(title)
     tag_l = 1.0
     tag_t = 0.8
 
@@ -707,13 +714,18 @@ def _fill_theory_slide(slide, content: SlideContent):
         Inches(tag_l), Inches(tag_t), Inches(tag_w), Inches(tag_h),
     )
     tag.fill.solid()
-    tag.fill.fore_color.rgb = YELLOW
+    tag.fill.fore_color.rgb = TAG_BG
     tag.line.fill.background()
     tag.shadow.inherit = False
-    tag.adjustments[0] = 0.12  # gentler rounding
+    tag.adjustments[0] = 0.12
 
     tf = tag.text_frame
     tf.word_wrap = False
+    try:
+        from pptx.enum.text import MSO_AUTO_SIZE
+        tf.auto_size = MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT
+    except Exception:
+        pass
     tf.margin_left = Inches(PAD_X)
     tf.margin_right = Inches(PAD_X)
     tf.margin_top = Inches(PAD_Y)
@@ -726,7 +738,7 @@ def _fill_theory_slide(slide, content: SlideContent):
     run.font.size = Pt(title_pt)
     run.font.bold = True
     run.font.name = "Anton"
-    run.font.color.rgb = BLACK
+    run.font.color.rgb = TAG_TEXT
 
     # ── Body — arrow bullets + optional (a)/(b) sub-bullets ──────────────────
     body_left = Inches(1.5)
@@ -735,6 +747,9 @@ def _fill_theory_slide(slide, content: SlideContent):
     body_height = Inches(22.5 - (tag_t + tag_h + 0.9) - 1.2)  # leave footer room
 
     bullets = [b for b in (content.bullets or []) if b and b.strip()]
+    # Drop bullets that are EMPTY once the "-> "/"➤" marker is removed — these
+    # would otherwise render as a lone arrow with no text.
+    bullets = [b for b in bullets if _strip_theory_prefix(b).strip()]
     if not bullets:
         return
 
@@ -788,11 +803,47 @@ def _fill_theory_slide(slide, content: SlideContent):
 # Table renderers — table_slide and theory_table_slide
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _draw_yellow_title_tag(slide, raw_title: str, top_in: float = 0.8) -> tuple[float, float]:
+def _fit_title_tag(title: str) -> tuple[int, float, float]:
     """
-    Shared helper: draws the same yellow rounded-rect title tag used by
-    theory_slide at the top of the slide. Returns the (left, top + height)
-    in inches, so callers know where the body content can start.
+    Pick (font_pt, tag_width_in, tag_height_in) so the title NEVER overflows
+    its rounded-rect background.
+
+    Two prior bugs caused overflow:
+      • char-width was under-estimated (0.012), but LibreOffice substitutes the
+        Anton display font with a WIDER bold sans, so real text ran longer.
+      • tag width was clipped at 26in even when the title needed more — so a
+        long heading spilled past the colored pill.
+
+    Fix: use a conservative char-width, allow the pill to grow up to a hard
+    right-edge bound (keeping clear of the top-right PW badge at ~36.6in), and
+    only then step the font down. The pill is always sized to contain the text.
+    """
+    PAD_X = 0.6
+    PAD_Y = 0.20
+    SAFETY = 0.5
+    USABLE_MAX_W = 33.0          # hard right bound before the PW badge
+    char_w = 0.0135              # conservative for the bold substitute font
+    budget = USABLE_MAX_W - 2 * PAD_X - SAFETY
+
+    n = max(len(title), 1)
+    title_pt = 28
+    for candidate_pt in (72, 64, 56, 48, 42, 36, 32, 28):
+        if n * candidate_pt * char_w <= budget:
+            title_pt = candidate_pt
+            break
+
+    text_w_in = n * title_pt * char_w
+    tag_w = max(min(text_w_in + 2 * PAD_X + SAFETY, USABLE_MAX_W), 5.0)
+    tag_h = title_pt / 72.0 + 2 * PAD_Y + 0.35
+    return title_pt, tag_w, tag_h
+
+
+def _draw_yellow_title_tag(slide, raw_title: str, top_in: float = 0.8,
+                           is_solution: bool = False) -> tuple[float, float]:
+    """
+    Shared helper: draws a rounded-rect title tag at the top of the slide.
+    Yellow for normal slides, green for solution slides.
+    Returns the (left, top + height) in inches.
     """
     from pptx.util import Inches, Pt
     from pptx.dml.color import RGBColor
@@ -800,24 +851,17 @@ def _draw_yellow_title_tag(slide, raw_title: str, top_in: float = 0.8) -> tuple[
     from pptx.enum.shapes import MSO_SHAPE
 
     YELLOW = RGBColor(0xFF, 0xCC, 0x31)
+    GREEN  = RGBColor(0x4C, 0xAF, 0x50)
     BLACK  = RGBColor(0x10, 0x10, 0x10)
+    WHITE  = RGBColor(0xFF, 0xFF, 0xFF)
+    TAG_BG = GREEN if is_solution else YELLOW
+    TAG_TEXT = WHITE if is_solution else BLACK
 
     title = (raw_title or "TOPIC").strip().upper() or "TOPIC"
 
-    MAX_TAG_W = 26.0
     PAD_X = 0.6
     PAD_Y = 0.20
-    SAFETY = 0.5
-    char_w = 0.012
-    for candidate_pt in (72, 64, 56, 48, 42, 36):
-        if len(title) * candidate_pt * char_w <= MAX_TAG_W - 2 * PAD_X - SAFETY:
-            title_pt = candidate_pt
-            break
-    else:
-        title_pt = 36
-    text_w_in = len(title) * title_pt * char_w
-    tag_w = min(MAX_TAG_W, max(text_w_in + 2 * PAD_X + SAFETY, 5.0))
-    tag_h = title_pt / 72.0 + 2 * PAD_Y + 0.35
+    title_pt, tag_w, tag_h = _fit_title_tag(title)
     tag_l = 1.0
 
     tag = slide.shapes.add_shape(
@@ -825,13 +869,21 @@ def _draw_yellow_title_tag(slide, raw_title: str, top_in: float = 0.8) -> tuple[
         Inches(tag_l), Inches(top_in), Inches(tag_w), Inches(tag_h),
     )
     tag.fill.solid()
-    tag.fill.fore_color.rgb = YELLOW
+    tag.fill.fore_color.rgb = TAG_BG
     tag.line.fill.background()
     tag.shadow.inherit = False
     tag.adjustments[0] = 0.12
 
     tf = tag.text_frame
     tf.word_wrap = False
+    # Auto-size the pill to the ACTUAL rendered text so the heading can never
+    # overflow its background, even if the display font renders wider than our
+    # width estimate. LibreOffice honours this when exporting the PDF preview.
+    try:
+        from pptx.enum.text import MSO_AUTO_SIZE
+        tf.auto_size = MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT
+    except Exception:
+        pass
     tf.margin_left = Inches(PAD_X)
     tf.margin_right = Inches(PAD_X)
     tf.margin_top = Inches(PAD_Y)
@@ -844,7 +896,7 @@ def _draw_yellow_title_tag(slide, raw_title: str, top_in: float = 0.8) -> tuple[
     run.font.size = Pt(title_pt)
     run.font.bold = True
     run.font.name = "Anton"
-    run.font.color.rgb = BLACK
+    run.font.color.rgb = TAG_TEXT
 
     return tag_l, top_in + tag_h
 
@@ -904,6 +956,7 @@ def _add_styled_table(
     width_in: float,
     height_in: float,
     column_alignments: list[str] | None = None,
+    vcenter: bool = True,
 ):
     """
     Render a real PowerPoint table on the dark slide.
@@ -914,9 +967,16 @@ def _add_styled_table(
                      row reads cleanly against the dark template background.
                      White text.
       - Borders    : thin dark grey lines so the grid is visible but not loud.
-      - Column widths: proportional to the longest cell length in each column.
-      - Font size  : auto-shrunk so all rows fit in `height_in`.
+      - Column widths: content-proportional but CLAMPED so one long label
+                       column can't dominate and starve the data columns.
+      - Row heights : sized NATURALLY from the font (≈ comfortable padding),
+                      not stretched to fill the slide. A small table stays a
+                      small, tidy block instead of ballooning to full height.
+      - Placement   : the finished block is VERTICALLY CENTERED within the
+                      [top_in, top_in + height_in] region (when `vcenter`),
+                      exactly like a hand-made deck would place it.
 
+    `height_in` is the AVAILABLE region height (a budget), not a forced size.
     `column_alignments` is an optional list with "left"/"center"/"right" per
     column. When omitted, numeric-looking columns default to right-aligned
     and text columns default to left-aligned.
@@ -943,30 +1003,20 @@ def _add_styled_table(
 
     total_rows = len(norm_rows) + 1  # +1 for header
 
-    table_shape = slide.shapes.add_table(
-        total_rows, cols,
-        Inches(left_in), Inches(top_in),
-        Inches(width_in), Inches(height_in),
-    )
-    table = table_shape.table
-
-    # ── Column widths from content -----------------------------------------
+    # ── Column widths — content-proportional but CLAMPED ───────────────────
+    # A long row-label ("P.V.A.F for 4 year") shouldn't be 3-4× the numeric
+    # columns. Clamp each column's effective length to [avg×0.7, avg×1.7] so
+    # the table reads balanced; long labels simply word-wrap.
     col_text_len = [max(len(headers[c]), 1) for c in range(cols)]
     for r in norm_rows:
         for c in range(cols):
             col_text_len[c] = max(col_text_len[c], len(r[c]))
-    total_len = sum(col_text_len) or 1
-    # Reserve a small minimum width (1.0 in) per column so single-character cells
-    # don't collapse to nothing.
-    MIN_COL_IN = 1.0
-    base_widths = [max(MIN_COL_IN, width_in * (l / total_len)) for l in col_text_len]
-    # Rescale to actually equal width_in.
-    scale = width_in / sum(base_widths)
-    widths = [w * scale for w in base_widths]
-    for c in range(cols):
-        table.columns[c].width = Inches(widths[c])
+    avg_len = sum(col_text_len) / cols
+    clamped = [min(max(l, avg_len * 0.7), avg_len * 1.7) for l in col_text_len]
+    total_clamped = sum(clamped) or 1
+    widths = [width_in * (l / total_clamped) for l in clamped]
 
-    # ── Font size auto-fit -------------------------------------------------
+    # ── Font size — fit the longest cell to its column width ───────────────
     longest_cell = max(col_text_len)
     avg_col_w = sum(widths) / cols
     font_pt = _pick_table_font_size(
@@ -977,13 +1027,43 @@ def _add_styled_table(
         available_col_width_in=avg_col_w,
     )
 
-    # Row heights — distribute the total height roughly evenly. The header
-    # gets a 1.15× share so it reads as a distinct band.
-    header_share = 1.15
-    unit = height_in / (header_share + (total_rows - 1))
-    table.rows[0].height = Inches(unit * header_share)
+    # ── Natural row heights (NOT stretched to fill) ────────────────────────
+    # A comfortable row ≈ font height × 1.9 + small padding. Header a touch
+    # taller. Cap so a few-row table never balloons; scale down only if the
+    # natural block would exceed the available region.
+    MIN_BODY_ROW_H = 0.65
+    MAX_BODY_ROW_H = 1.35
+    body_row_h = min(MAX_BODY_ROW_H, max(MIN_BODY_ROW_H, font_pt / 72.0 * 1.9 + 0.16))
+    header_row_h = body_row_h * 1.2
+    natural_h = header_row_h + body_row_h * (total_rows - 1)
+
+    if natural_h > height_in:
+        shrink = height_in / natural_h
+        body_row_h *= shrink
+        header_row_h *= shrink
+        natural_h = height_in
+
+    # Position the block within the available region. We bias toward the TOP
+    # (capped gap) instead of dead-centering, so a short table sits just below
+    # the title/caption rather than floating in the middle of a large void.
+    place_top = top_in
+    if vcenter and natural_h < height_in:
+        gap = (height_in - natural_h) / 2.0
+        place_top = top_in + min(gap, 1.6)
+
+    table_shape = slide.shapes.add_table(
+        total_rows, cols,
+        Inches(left_in), Inches(place_top),
+        Inches(width_in), Inches(natural_h),
+    )
+    table = table_shape.table
+
+    for c in range(cols):
+        table.columns[c].width = Inches(widths[c])
+
+    table.rows[0].height = Inches(header_row_h)
     for r in range(1, total_rows):
-        table.rows[r].height = Inches(unit)
+        table.rows[r].height = Inches(body_row_h)
 
     # ── Default alignment per column ---------------------------------------
     if column_alignments and len(column_alignments) == cols:
@@ -1097,11 +1177,14 @@ def _fill_table_slide(slide, content: SlideContent):
         _fill_theory_slide(slide, content)
         return
 
-    _, body_top = _draw_yellow_title_tag(slide, content.title, top_in=0.8)
+    _, body_top = _draw_yellow_title_tag(
+        slide, content.title, top_in=0.8,
+        is_solution=_is_solution_slide(content),
+    )
 
     LEFT = 1.0
-    WIDTH = 38.0           # canvas is 40 in → leaves 1in margin each side
-    BOTTOM_LIMIT = 21.4    # leave room for the context footer at the bottom
+    WIDTH = 38.0
+    BOTTOM_LIMIT = 21.4
 
     cur_top = body_top + 0.45
     cur_top = _draw_table_caption(
@@ -1157,7 +1240,10 @@ def _fill_theory_table_slide(slide, content: SlideContent):
         _fill_table_slide(slide, content)
         return
 
-    _, body_top = _draw_yellow_title_tag(slide, content.title, top_in=0.8)
+    _, body_top = _draw_yellow_title_tag(
+        slide, content.title, top_in=0.8,
+        is_solution=_is_solution_slide(content),
+    )
 
     BODY_LEFT  = 1.5
     BODY_WIDTH = 37.0
@@ -1776,7 +1862,7 @@ def generate_pptx(
     if not os.path.exists(TEMPLATE_PPTX):
         raise FileNotFoundError(
             f"Reference template not found: {TEMPLATE_PPTX}. "
-            "Add 'Common Template.pptx' to assets/reference_ppts/."
+            "Add 'Common Template.pptx' to backend/assets/reference_ppts/."
         )
 
     prs = Presentation(TEMPLATE_PPTX)

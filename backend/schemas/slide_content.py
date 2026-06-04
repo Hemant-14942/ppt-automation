@@ -1,9 +1,29 @@
 """This is the final content for each slide — actual title, bullets,
 diagram description, speaker notes, and the layout template ready to be
 placed into the PPT."""
-from pydantic import BaseModel
+import re
+from pydantic import BaseModel, field_validator
 from typing import Optional
 from schemas.slide_plan import TemplateType
+from schemas.text_sanitize import restore_symbols, strip_control_chars
+
+
+_CURRENCY_SWAP_RE = re.compile(
+    r'(\d[\d,.]*)\s*(Crore|Lakh|crore|lakh)?\s*(₹|\$|€|£)'
+)
+
+
+def _sanitize_slide_text(text: str | None) -> str | None:
+    if not text:
+        return text
+    # Restore mangled symbols (₹, ×, …) BEFORE stripping control chars, so a
+    # Word-escaped "_x20B9_" becomes ₹ instead of being deleted.
+    t = restore_symbols(text)
+    t = strip_control_chars(t)
+    t = _CURRENCY_SWAP_RE.sub(lambda m: f"{m.group(3)}{m.group(1)}{' ' + m.group(2) if m.group(2) else ''}", t)
+    # Tidy "₹ 71.375" → "₹71.375" (symbol hugs the number).
+    t = re.sub(r'([₹$€£])\s+(\d)', r'\1\2', t)
+    return t.strip()
 
 
 class TableBlock(BaseModel):
@@ -43,14 +63,30 @@ class SlideContent(BaseModel):
     layout:              TemplateType
 
     # ── passage_slide (cloze / reading-comprehension) only ───────────────────
-    # `directions` is the banner line ("Directions (Q. 22-24): Cloze Test –
-    # Passage 1"); `passage_text` is the VERBATIM paragraph with every blank
-    # (__X__, .....(1).....) preserved exactly as in the source PDF — never
-    # filled, paraphrased, or summarised.
     directions:          Optional[str] = None
     passage_text:        Optional[str] = None
 
     # ── table_slide / theory_table_slide only ────────────────────────────────
-    # Structured table extracted from the source page. Required when layout is
-    # `table_slide` or `theory_table_slide`; ignored otherwise.
     table_data:          Optional[TableBlock] = None
+
+    @field_validator('title', mode='before')
+    @classmethod
+    def clean_title(cls, v):
+        return _sanitize_slide_text(v) or ''
+
+    @field_validator('bullets', mode='before')
+    @classmethod
+    def clean_bullets(cls, v):
+        if not v:
+            return v
+        return [_sanitize_slide_text(b) or b for b in v]
+
+    @field_validator('speaker_notes', mode='before')
+    @classmethod
+    def clean_notes(cls, v):
+        return _sanitize_slide_text(v) or ''
+
+    @field_validator('passage_text', 'directions', mode='before')
+    @classmethod
+    def clean_passage(cls, v):
+        return _sanitize_slide_text(v)

@@ -1,6 +1,5 @@
 import os
 import json
-import shutil
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 from schemas.request import PDFContext, AnnotationItem, GenerateResponse
@@ -10,7 +9,9 @@ from pipeline.pptx_to_pdf import (
     is_available as libreoffice_available,
     LibreOfficeNotInstalled,
 )
-from config import UPLOAD_DIR, OUTPUT_DIR
+from config import UPLOAD_DIR, OUTPUT_DIR, STORAGE_BACKEND
+import uuid
+from storage.s3_storage import upload_file_to_s3, create_presigned_download_url
 
 
 router = APIRouter()
@@ -49,7 +50,12 @@ async def generate_ppt(
     # ── save uploaded PDF temporarily ───────────────
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-    pdf_path = os.path.join(UPLOAD_DIR, pdf_file.filename)
+    job_id = str(uuid.uuid4())
+
+    if STORAGE_BACKEND == "s3":
+        pdf_path = os.path.join(UPLOAD_DIR, f"{job_id}.pdf")
+    else:
+        pdf_path = os.path.join(UPLOAD_DIR, pdf_file.filename)
 
     with open(pdf_path, "wb") as f:
         content = await pdf_file.read()
@@ -60,6 +66,33 @@ async def generate_ppt(
     # ── run pipeline ────────────────────────────────
     result = await run_pipeline_async(pdf_path, context)
 
+    # ── upload generated PPT to S3 in production ─────
+    filename = result.get("filename")
+
+    if STORAGE_BACKEND == "s3" and result.get("status") == "success" and filename:
+        pptx_path = os.path.join(OUTPUT_DIR, filename)
+        s3_key = f"outputs/{job_id}/{filename}"
+
+        try:
+            upload_file_to_s3(
+                local_path=pptx_path,
+                s3_key=s3_key,
+                content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+            result["job_id"] = job_id
+            result["download_url"] = create_presigned_download_url(s3_key)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"PPT generated but S3 upload failed: {e}",
+            )
+
+        # ── cleanup local PPT ──────────────────────────
+        try:
+            os.remove(pptx_path)
+            print(f"  Cleaned up local PPT → {pptx_path}")
+        except Exception:
+            pass
     # ── cleanup uploaded PDF ────────────────────────
     try:
         os.remove(pdf_path)
@@ -89,6 +122,31 @@ async def download_ppt(filename: str):
         path=file_path,
         filename=filename,
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    )
+
+
+@router.get("/download-pdf/{filename}")
+async def download_pdf(filename: str):
+    """
+    Download endpoint — converts a generated .pptx to PDF and returns it as an
+    attachment. This requires LibreOffice on the backend.
+    """
+    pptx_path = os.path.join(OUTPUT_DIR, filename)
+    if not os.path.exists(pptx_path):
+        raise HTTPException(status_code=404, detail="PPT file not found")
+
+    try:
+        pdf_path = convert_pptx_to_pdf(pptx_path)
+    except LibreOfficeNotInstalled as e:
+        raise HTTPException(status_code=501, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF export failed: {e}")
+
+    pdf_filename = os.path.splitext(os.path.basename(filename))[0] + ".pdf"
+    return FileResponse(
+        path=pdf_path,
+        filename=pdf_filename,
+        media_type="application/pdf",
     )
 
 
@@ -125,5 +183,6 @@ async def health_check():
     """Simple health check — frontend can ping this to check if server is running."""
     return {
         "status": "ok",
+        "storage_backend": STORAGE_BACKEND,
         "preview_available": libreoffice_available(),
     }

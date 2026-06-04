@@ -27,7 +27,10 @@ class PDFContext(BaseModel):
 class GenerateResponse(BaseModel):
     """What the API returns after processing."""
     status:       str                   # "success" / "error"
+    job_id:       Optional[str] = None
     filename:     Optional[str] = None
+    download_url: Optional[str] = None
+    preview_url:  Optional[str] = None
     total_pages:  Optional[int] = None
     total_slides: Optional[int] = None
     message:      Optional[str] = None

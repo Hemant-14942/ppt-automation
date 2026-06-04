@@ -1,16 +1,27 @@
 "use client";
 
 import { GenerateResponse } from "@/types";
-import { getDownloadURL } from "@/lib/api";
+import { getDownloadURL, getPdfDownloadURL } from "@/lib/api";
 import { Download, FileSliders, RotateCcw, Sparkles } from "lucide-react";
 
 interface DownloadCardProps {
   result: GenerateResponse;
+  previewAvailable: boolean;
   onReset: () => void;
 }
 
-export default function DownloadCard({ result, onReset }: DownloadCardProps) {
-  const downloadURL = result.filename ? getDownloadURL(result.filename) : null;
+export default function DownloadCard({
+  result,
+  previewAvailable,
+  onReset,
+}: DownloadCardProps) {
+  const downloadURL =
+    result.download_url ??
+    (result.filename ? getDownloadURL(result.filename) : null);
+  const pdfDownloadURL =
+    previewAvailable && result.filename
+      ? getPdfDownloadURL(result.filename)
+      : null;
 
   return (
     <div className="space-y-6 text-center">
@@ -70,6 +81,16 @@ export default function DownloadCard({ result, onReset }: DownloadCardProps) {
           >
             <Download className="h-4 w-4" />
             Download .pptx
+          </a>
+        )}
+        {pdfDownloadURL && (
+          <a
+            href={pdfDownloadURL}
+            download={result.filename?.replace(/\.pptx$/i, ".pdf")}
+            className="flex w-full items-center justify-center gap-2 rounded-xl border border-violet-500/30 bg-violet-500/10 px-5 py-3 text-sm font-semibold text-violet-100 transition-all hover:bg-violet-500/15 active:scale-[0.98]"
+          >
+            <Download className="h-4 w-4" />
+            Download .pdf
           </a>
         )}
         <button

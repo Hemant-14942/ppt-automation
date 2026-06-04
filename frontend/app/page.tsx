@@ -365,9 +365,19 @@ export default function Home() {
 
             {/* ── STEP: done ── */}
             {step === "done" && result && (
-              <div className="grid gap-6 md:grid-cols-[1fr_minmax(0,1.4fr)]">
-                <DownloadCard result={result} onReset={handleReset} />
-                {result.filename && (
+              <div
+                className={
+                  previewAvailable && result.filename
+                    ? "grid gap-6 md:grid-cols-[1fr_minmax(0,1.4fr)]"
+                    : "mx-auto max-w-md"
+                }
+              >
+                <DownloadCard
+                  result={result}
+                  previewAvailable={previewAvailable}
+                  onReset={handleReset}
+                />
+                {previewAvailable && result.filename && (
                   <PreviewPane
                     filename={result.filename}
                     previewAvailable={previewAvailable}

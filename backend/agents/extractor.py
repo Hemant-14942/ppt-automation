@@ -62,8 +62,40 @@ TASK 1 — Extract ALL textual content into `main_text`
   watermarks, and any text that's clearly bleed-through from an adjacent
   page or column.
 
+CURRENCY / SYMBOL ORDERING (critical):
+  Currency symbols (₹, $, €, £) ALWAYS go BEFORE the number:
+    ✓  ₹25 Crore      ✓  ₹71.375 Crore     ✓  $5,000
+    ✗  25 Crore ₹     ✗  71.375 Crore ₹     ✗  5,000 $
+  Even if the PDF renders them in a weird position (due to text boxes / RTL
+  quirks), ALWAYS output them in the correct natural order: SYMBOL + NUMBER.
+
+CONTROL CHARACTERS:
+  NEVER output raw control character escapes like _x000D_, _x0008_, etc.
+  These are Word XML artefacts — silently drop them. Write clean text only.
+
 ═════════════════════════════════════════════════════════════════════════════
-TASK 2 — Identify EVERY SINGLE visual annotation (CRITICAL — DO NOT MISS ANY)
+TASK 2 — Detect TABLES
+═════════════════════════════════════════════════════════════════════════════
+
+If the page contains a visual TABLE (a grid of rows × columns — discount
+factor tables, comparison charts, score grids, schedules, financial data),
+you MUST:
+  • Set `has_table = true`
+  • Set `content_type = "table"` (or "mixed" if the page also has
+    substantial non-table text like theory paragraphs around the table)
+  • Set `table_description` to a short description: e.g.
+    "PV discount factors table: 5 columns (Year, 15%, 14%, 13%, 12%),
+     5 rows (Year 1-4 + PVAF)"
+  • ALSO include the table data in `main_text` as a plaintext rendering:
+    "Year | 15% | 14% | 13% | 12%\n1 | 0.870 | 0.877 | 0.885 | 0.893\n..."
+    Use " | " pipe separators between columns and newlines between rows.
+
+This is CRITICAL: tables turned into prose bullets ("the factors are 0.869,
+0.877…") become unreadable. The planner MUST know a table exists so it can
+use `table_slide` and preserve the grid structure.
+
+═════════════════════════════════════════════════════════════════════════════
+TASK 3 — Identify EVERY SINGLE visual annotation (CRITICAL — DO NOT MISS ANY)
 ═════════════════════════════════════════════════════════════════════════════
 
 Annotation interpretation rules provided by the instructor:

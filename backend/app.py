@@ -2,7 +2,7 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.routes import router
-from config import UPLOAD_DIR, OUTPUT_DIR
+from config import FRONTEND_ORIGINS, UPLOAD_DIR, OUTPUT_DIR
 from pipeline.pptx_to_pdf import prewarm as prewarm_libreoffice, is_available as libreoffice_available
 import os
 
@@ -18,8 +18,8 @@ app = FastAPI(
 # ── CORS — allow frontend to talk to backend ────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # allow all origins for now
-    allow_credentials=True,       # MVP — restrict in production
+    allow_origins=FRONTEND_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

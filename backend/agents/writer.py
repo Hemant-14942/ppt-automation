@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from dataclasses import dataclass
 from typing import Optional
 from google.genai import types
@@ -89,6 +90,65 @@ def _max_bullets_for_layout(layout: TemplateType) -> int:
 
 
 _THEORY_SUBBULLET_PREFIXES = ("(a)", "(b)", "(c)", "(d)", "(A)", "(B)", "(C)", "(D)")
+
+_MCQ_LAYOUTS = {
+    TemplateType.mcq_slide,
+    TemplateType.mcq_grid_slide,
+    TemplateType.pyq_slide,
+    TemplateType.pyq_grid_slide,
+}
+
+# Captures "(a) <text>" option groups, where <text> runs until the next
+# "(b)"/"(c)"/… marker or end of string. Handles both inline and multi-line.
+_OPTION_PAT = re.compile(
+    r"\(?\b([a-dA-D])\b[\)\.]\s*(.+?)(?=\s*\(?\b[a-dA-D]\b[\)\.]|$)",
+    re.DOTALL,
+)
+
+
+def _recover_mcq_options(title: str, source_content: list[dict]) -> list[str]:
+    """
+    Deterministic safety net for MCQ/PYQ slides.
+
+    The writer LLM occasionally returns an MCQ with EMPTY options (the user
+    saw "A B C D" with no text). The four options ARE present in the source
+    page text, so we parse them directly: locate the question stem, then grab
+    the first (a)/(b)/(c)/(d) group that follows it.
+
+    Returns up to 4 option strings (without the "(a)" prefix — the renderer
+    strips prefixes anyway), or [] if nothing parseable is found.
+    """
+    blob = "\n".join((s.get("main_text") or "") for s in source_content)
+    if not blob.strip():
+        return []
+
+    norm = re.sub(r"[ \t]+", " ", blob)
+    # Try to start scanning from the question stem so we grab THIS question's
+    # options (a page can hold several MCQs).
+    key = re.sub(r"\s+", " ", (title or "")).strip().lower()
+    key = re.sub(r"^[0-9]+[\).]\s*", "", key)[:30]
+    region = norm
+    if key:
+        pos = norm.lower().find(key)
+        if pos >= 0:
+            region = norm[pos:]
+
+    seen: dict[str, str] = {}
+    for label, val in _OPTION_PAT.findall(region):
+        label = label.lower()
+        # Drop any trailing "Answer: ..." / "Ans ..." that follows the option.
+        val = re.split(r"\b(?:answer|ans)\b", val, flags=re.IGNORECASE)[0]
+        val = " ".join(val.split()).strip(" .;,")
+        # Stop if we wandered into the next question (a long sentence ending
+        # in '?' that isn't an option value).
+        if not val or len(val) > 60:
+            continue
+        if label not in seen:
+            seen[label] = val
+        if len(seen) == 4:
+            break
+
+    return [seen[l] for l in ("a", "b", "c", "d") if l in seen]
 
 
 def _normalize_theory_bullets(bullets: list[str]) -> list[str]:
@@ -295,7 +355,20 @@ PER-TEMPLATE RULES (apply ONLY the rule for YOUR template below):
           -> There are two methods for determining producer's equilibrium:
           (a) Total Revenue and Total Cost approach (TR-TC)
           (b) Marginal Revenue and Marginal Cost approach (MR-MC)
-    - Include key formulas inline when present in the source.
+    - FORMULA FORMATTING: when the source has a formula/equation, make it
+      VISUALLY PROMINENT — dedicate a bullet to the formula itself:
+          -> Formula: P₀ = E(1−b) / (Ke − br)
+      Then follow with substitution and result in separate bullets:
+          -> Substituting: 159.09 = 10(1−b) / (0.08 − 0.12b)
+          -> Result: b = 0.30, so Dividend Payout = 1 − 0.30 = 70%
+      NEVER bury formulas mid-sentence in a long prose paragraph.
+    - SOLUTION SLIDES: if this slide presents a worked-out SOLUTION, structure
+      it as step-by-step working, NOT as descriptive prose:
+          ✓  -> Formula: Cost = Annual Outflow × PVAF
+          ✓  -> Given: ₹25 Crore/year, PVAF (15%, 4yr) = 2.855
+          ✓  -> Calculation: 25 × 2.855 = ₹71.375 Crore
+          ✗  "The cost is determined by multiplying the annual cash outflow
+              by the present value annuity factor, which yields the result."
 
   passage_slide:
     - This is a CLOZE / reading-comprehension passage. Reproduce it EXACTLY.
@@ -389,6 +462,20 @@ GLOBAL RULES:
 - Set `layout` in the output to the same template name shown above.
 - Write in {context.language}.
 
+ANTI-HALLUCINATION — SOURCE FIDELITY (CRITICAL):
+- Use ONLY facts, numbers, and formulas that appear in the SOURCE CONTENT below.
+- NEVER generate generic filler like "A comprehensive risk assessment must
+  consider factors such as market volatility, technological obsolescence…"
+  unless those exact words appear in the source.
+- If the source says "₹25 Crore" and "PVAF = 2.855", your slide must say
+  exactly that — not a paraphrased version.
+- Prefer the source's ACTUAL DATA (numbers, names, values) over generic
+  descriptions of what the data represents.
+
+CURRENCY SYMBOLS:
+- Always place currency symbols BEFORE the number: ₹25 Crore, $5,000
+- NEVER write "25 Crore ₹" or "5,000 $"
+
 ABSOLUTE RULE — TITLE FIELD HYGIENE (applies to ALL mcq/pyq variants):
   The `title` field = ONLY the question stem (the phrase/sentence being asked).
   NEVER include any of these in the title:
@@ -447,6 +534,19 @@ async def _write_slide_async(
             slide.bullets = slide.bullets[:limit]
             if slide.layout in (TemplateType.theory_slide, TemplateType.theory_table_slide):
                 slide.bullets = _normalize_theory_bullets(slide.bullets)
+
+            # Safety net: MCQ/PYQ slides MUST carry their options. If the LLM
+            # returned fewer than 4 non-empty options, recover them from the
+            # source page text so we never render an empty A/B/C/D question.
+            if slide.layout in _MCQ_LAYOUTS:
+                have = [b for b in slide.bullets if b and b.strip()]
+                if len(have) < 4:
+                    recovered = _recover_mcq_options(slide.title, source_content)
+                    if len(recovered) >= len(have) and len(recovered) >= 2:
+                        slide.bullets = recovered[:4]
+                        print(f"  Slide {payload.my_slide.slide_number} — "
+                              f"recovered {len(recovered)} MCQ option(s) from source")
+
             print(f"  Slide {payload.my_slide.slide_number} — written OK")
             return slide
 

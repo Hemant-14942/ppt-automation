@@ -31,6 +31,10 @@ export function getPreviewURL(filename: string): string {
   return `${BASE_URL}/api/preview/${encodeURIComponent(filename)}`;
 }
 
+export function getPdfDownloadURL(filename: string): string {
+  return `${BASE_URL}/api/download-pdf/${encodeURIComponent(filename)}`;
+}
+
 export interface HealthStatus {
   online: boolean;
   previewAvailable: boolean;

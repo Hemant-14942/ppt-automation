@@ -9,3 +9,4 @@ pdf2image
 Pillow
 pymupdf
 pyyaml
+boto3

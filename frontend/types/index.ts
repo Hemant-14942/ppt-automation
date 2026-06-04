@@ -19,7 +19,10 @@ export interface PDFContext {
 
 export interface GenerateResponse {
   status: "success" | "error";
+  job_id?: string;
   filename?: string;
+  download_url?: string;
+  preview_url?: string;
   total_pages?: number;
   total_slides?: number;
   message?: string;

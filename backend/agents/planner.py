@@ -278,6 +278,15 @@ Structural rules
 11. The slide TITLE for an mcq/pyq slide should be the question stem itself
     (e.g. "A large number of fish swimming together"), NOT a number like
     "Q.661". This makes the deck student-friendly.
+11b. DUPLICATE TITLES — NEVER give two consecutive slides the exact same title.
+    If a topic spans multiple slides, differentiate them:
+      ✓  "Cost of Project M — Setup"  then  "Cost of Project M — Calculation"
+      ✓  "Dividend Payout Ratio"  then  "Dividend Per Share"
+      ✗  "CALCULATION OF DIVIDEND PAYOUT RATIO" then "CALCULATION OF DIVIDEND PAYOUT RATIO"
+    Each slide title MUST be unique and describe that specific slide's content.
+11c. SOLUTION SLIDES — when a slide presents a worked-out solution or answer
+    derivation, prefix the title with "Solution:" so the renderer can add a
+    distinct visual treatment. Example: "Solution: Cost of Project M".
 12. TABLE coverage (CRITICAL — do not prosify tables):
     If the source page shows a rendered TABLE (a row × column grid of
     values — discount factors, comparison data, schedules, score grids,
@@ -373,6 +382,33 @@ def _summarize_include_targets(page: ExtractedPage) -> list[str]:
     return targets
 
 
+def _detect_table_pages(extracted_pages: list[ExtractedPage]) -> str:
+    """Generate a TABLE DETECTION summary for the planner prompt."""
+    table_pages = []
+    for p in extracted_pages:
+        has_explicit = getattr(p, 'has_table', False)
+        text = (p.main_text or "")
+        has_pipe_table = text.count(" | ") >= 3
+        ct = p.content_type.value if hasattr(p.content_type, 'value') else str(p.content_type)
+        if has_explicit or has_pipe_table or ct == "table":
+            desc = getattr(p, 'table_description', None) or "(table detected from content)"
+            table_pages.append(f"  - Page {p.page_number}: {desc}")
+    if not table_pages:
+        return ""
+    return (
+        "\n⚠️ TABLE DETECTION — HARD CONSTRAINT ⚠️\n"
+        "The following pages contain TABLES (grids of values). For EACH such "
+        "page you MUST emit at least ONE slide whose template is table_slide "
+        "(table only) or theory_table_slide (≤3 bullets + small table) that "
+        "carries the table data. Even if the page ALSO has theory prose that you "
+        "split onto separate theory_slides, the TABLE portion gets its own "
+        "table_slide. NEVER prosify a table into theory bullets like 'the factors "
+        "are 0.869, 0.877…' — that is unreadable. Give the table slide a clear "
+        "title like 'Discount Factors' or 'PV Factors'.\n"
+        + "\n".join(table_pages) + "\n"
+    )
+
+
 def _global_summary(extracted_pages: list[ExtractedPage]) -> str:
     """Top-of-prompt summary the planner reads BEFORE the per-page JSON."""
     total_include = sum(_count_include_annotations(p) for p in extracted_pages)
@@ -437,7 +473,7 @@ def plan_slides(
     for page in extracted_pages:
         include_n = _count_include_annotations(page)
         include_targets = _summarize_include_targets(page)
-        pages_data.append({
+        page_entry = {
             "page_number":        page.page_number,
             "content_type":       page.content_type,
             "main_text":          page.main_text,
@@ -454,7 +490,16 @@ def plan_slides(
                 }
                 for ann in page.annotations
             ]
-        })
+        }
+        if getattr(page, 'has_table', False):
+            page_entry["has_table"] = True
+            page_entry["table_description"] = getattr(page, 'table_description', None) or ""
+            page_entry["TABLE_LAYOUT_HINT"] = (
+                "⚠️ This page contains a TABLE. Use table_slide (table only) or "
+                "theory_table_slide (short theory + table). Do NOT use theory_slide "
+                "and prosify the table data into bullet text."
+            )
+        pages_data.append(page_entry)
 
     prompt = build_planning_prompt(context, strategy)
     summary = _global_summary(extracted_pages)
@@ -476,10 +521,13 @@ def plan_slides(
             f"{expected_passages} passage_slides.\n"
         )
 
+    table_block = _detect_table_pages(extracted_pages)
+
     full_prompt = (
         f"{prompt}\n\n"
         f"{summary}"
-        f"{passage_block}\n\n"
+        f"{passage_block}"
+        f"{table_block}\n\n"
         f"Here is the extracted page data (full text — do not skip any):\n"
         f"{json.dumps(pages_data, indent=2, ensure_ascii=False)}"
     )

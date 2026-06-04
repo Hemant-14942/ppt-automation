@@ -5,6 +5,14 @@ load_dotenv()
 
 # API
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+FRONTEND_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "FRONTEND_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    ).split(",")
+    if origin.strip()
+]
 
 # Models
 EXTRACTION_MODEL   = "gemini-2.5-flash"
@@ -18,15 +26,33 @@ PROFILER_MODEL     = "gemini-2.5-flash"
 PDF_DPI = 110
 
 # PPT
-OUTPUT_DIR  = "outputs"
-UPLOAD_DIR  = "uploads"
+STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local").lower()
+
+UPLOAD_DIR = os.getenv(
+    "UPLOAD_DIR",
+    "/tmp/pdf-to-ppt/uploads" if STORAGE_BACKEND == "s3" else "uploads"
+)
+
+OUTPUT_DIR = os.getenv(
+    "OUTPUT_DIR",
+    "/tmp/pdf-to-ppt/outputs" if STORAGE_BACKEND == "s3" else "outputs"
+)
+# s3
+# S3 storage config. Used only when STORAGE_BACKEND=s3.
+AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+S3_PRESIGNED_URL_EXPIRE_SECONDS = int(
+    os.getenv("S3_PRESIGNED_URL_EXPIRE_SECONDS", "3600")
+)
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+
 
 # Reference template — every slide is cloned from this file so the look matches.
-# Path is relative to repo root (one level up from backend/).
+# Kept inside backend/ so Railway can deploy the backend service by itself.
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT   = os.path.dirname(_BACKEND_DIR)
 TEMPLATE_PPTX = os.path.join(
-    _REPO_ROOT, "assets", "reference_ppts", "Common Template.pptx"
+    _BACKEND_DIR, "assets", "reference_ppts", "Common Template.pptx"
 )
 
 # Agent settings

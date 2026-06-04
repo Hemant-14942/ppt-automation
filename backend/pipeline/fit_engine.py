@@ -355,6 +355,55 @@ def reflow_slides(
     return out, log
 
 
+_CONT_STRUCTURAL = {
+    TemplateType.title_slide, TemplateType.section_heading,
+    TemplateType.thank_you_slide,
+}
+
+_CONT_SUFFIX_RE = re.compile(r'\s*\(cont\.(?:\s*\d+)?\)\s*$', re.IGNORECASE)
+
+
+def _strip_cont_suffix(title: str) -> str:
+    return _CONT_SUFFIX_RE.sub('', title or '').strip()
+
+
+def label_continuation_titles(
+    contents: list[SlideContent],
+) -> tuple[list[SlideContent], list[str]]:
+    """
+    Make consecutive slides that share the SAME title visually distinct.
+
+    Whether a long topic was paginated by reflow or the planner simply emitted
+    two slides with the same heading, two identical titles in a row read like a
+    glitch. We append " (cont.)" / " (cont. 2)" to the 2nd+ slide of each run so
+    the audience knows it continues the previous slide.
+
+    Idempotent: any existing "(cont.)" suffix is stripped first, so re-running
+    (e.g. inside the visual loop) never compounds suffixes. Reflow's own "(i/n)"
+    suffixes are left alone.
+    """
+    log: list[str] = []
+    prev_base = None
+    run_idx = 0
+    for c in contents:
+        # Normalise away any suffix we added on a previous pass.
+        c.title = _strip_cont_suffix(c.title)
+        if c.layout in _CONT_STRUCTURAL or _has_continuation_suffix(c.title):
+            prev_base = None
+            run_idx = 0
+            continue
+        base = (c.title or "").strip()
+        if base and base.lower() == (prev_base or "").lower():
+            run_idx += 1
+            suffix = " (cont.)" if run_idx == 1 else f" (cont. {run_idx})"
+            c.title = base + suffix
+            log.append(f"slide {c.slide_number}: '{base[:40]}' → '{c.title[:48]}'")
+        else:
+            prev_base = base
+            run_idx = 0
+    return contents, log
+
+
 def is_free_body_layout(layout: TemplateType) -> bool:
     """True if this layout's body paginates (theory / summary / homework)."""
     cap = _CAPACITY.get(layout)

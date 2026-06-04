@@ -27,8 +27,8 @@ from pipeline.profile_learner import learn_profiles, render_profiles_report
 from pipeline.token_tracker import TokenTracker
 from pipeline.style_writer  import merge_style_update, write_learned_profiles
 from pipeline.ppt_generator import generate_pptx
-from pipeline.fit_engine import reflow_slides, render_reflow_report, is_free_body_layout
-from pipeline.slide_cleanup import drop_placeholder_slides, render_cleanup_report
+from pipeline.fit_engine import reflow_slides, render_reflow_report, is_free_body_layout, label_continuation_titles
+from pipeline.slide_cleanup import drop_placeholder_slides, render_cleanup_report, dedupe_tables, render_dedupe_report
 from pipeline.pptx_to_pdf import is_available as libreoffice_available
 from schemas.request import PDFContext
 from config import STYLE_YAML, MEMORY_DIR, MAX_VISUAL_RETRIES, MAX_PAGINATION_ROUNDS
@@ -93,6 +93,7 @@ async def _run_visual_critique_loop(
         slide_contents, reflow_log = reflow_slides(
             slide_contents, strategy, overflow_pressure=overflow_pressure
         )
+        slide_contents, _ = label_continuation_titles(slide_contents)
         print(render_reflow_report(reflow_log))
         slide_contents = auto_fix(slide_contents, run_qc(slide_contents))
         output_path = generate_pptx(slide_contents, context, output_filename)
@@ -429,6 +430,8 @@ async def _run_linear_pipeline(pdf_path: str, context: PDFContext) -> dict:
         print("STEP 4.6 — Dropping empty/placeholder slides...")
         all_slide_contents, cleanup_log = drop_placeholder_slides(all_slide_contents)
         print(render_cleanup_report(cleanup_log))
+        all_slide_contents, dedupe_log = dedupe_tables(all_slide_contents)
+        print(render_dedupe_report(dedupe_log))
         print()
 
         # ── STEP 4.7: Fit & reflow — paginate overflowing slides ──
@@ -436,6 +439,7 @@ async def _run_linear_pipeline(pdf_path: str, context: PDFContext) -> dict:
         # continuation slides so nothing is lost and text stays readable.
         print("STEP 4.7 — Fit & reflow (pagination)...")
         all_slide_contents, reflow_log = reflow_slides(all_slide_contents, strategy)
+        all_slide_contents, _ = label_continuation_titles(all_slide_contents)
         pagination_splits = len(reflow_log)   # Phase-4 outcome signal
         print(render_reflow_report(reflow_log))
         print()

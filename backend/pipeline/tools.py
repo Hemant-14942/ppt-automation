@@ -33,8 +33,8 @@ from agents.visual_critic       import critique_deck_visually, critique_slides_v
 from agents.qc_agent            import run_qc, auto_fix
 from pipeline.plan_revisor      import apply_revisions
 from pipeline.faithfulness_revisor import apply_strips, collect_rewrite_hints
-from pipeline.fit_engine         import reflow_slides
-from pipeline.slide_cleanup      import drop_placeholder_slides
+from pipeline.fit_engine         import reflow_slides, label_continuation_titles
+from pipeline.slide_cleanup      import drop_placeholder_slides, dedupe_tables
 from pipeline.ppt_generator     import generate_pptx
 from pipeline.pptx_to_pdf       import is_available as libreoffice_available
 
@@ -246,7 +246,9 @@ async def _t_generate(state: PipelineState) -> str:
         raise RuntimeError("generate_pptx requires written slides")
     # drop empty/placeholder slides, then paginate, before QC + generation
     state.slide_contents, _ = drop_placeholder_slides(state.slide_contents)
+    state.slide_contents, _ = dedupe_tables(state.slide_contents)
     state.slide_contents, _ = reflow_slides(state.slide_contents, state.strategy)
+    state.slide_contents, _ = label_continuation_titles(state.slide_contents)
     # always run QC + auto-fix immediately before generation
     issues = run_qc(state.slide_contents)
     state.slide_contents = auto_fix(state.slide_contents, issues)

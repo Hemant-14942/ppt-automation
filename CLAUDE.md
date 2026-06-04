@@ -11,8 +11,8 @@ See `.cursor/rules/project.mdc` for project layout and run commands.
 
 - Pipeline: `backend/pipeline/orchestrator.py`
 - Agents: `backend/agents/`
-- CLI: `run_pipeline.py` (repo root)
 - API: `backend/app.py`
+- PPT assets: `backend/assets/reference_ppts/`
 
 ## Do not commit
 
