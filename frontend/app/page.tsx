@@ -1,7 +1,13 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import { AppStep, PDFContext, PipelineStep, GenerateResponse } from "@/types";
+import {
+  AnnotationItem,
+  AppStep,
+  PDFContext,
+  PipelineStep,
+  GenerateResponse,
+} from "@/types";
 import FileUpload from "@/components/FileUpload";
 import ContextForm from "@/components/ContextForm";
 import ProcessFlow from "@/components/ProcessFlow";
