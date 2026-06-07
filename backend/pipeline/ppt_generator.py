@@ -12,6 +12,7 @@ clone the Recap layout (slide 1) and rewrite the big heading text with the
 topic title. The numbered bullet boxes already match what a theory slide needs.
 """
 import os
+import re
 import copy
 import math
 from pptx import Presentation
@@ -22,7 +23,63 @@ from lxml import etree
 from schemas.slide_content import SlideContent
 from schemas.slide_plan import TemplateType
 from schemas.request import PDFContext
-from config import OUTPUT_DIR, TEMPLATE_PPTX
+from config import OUTPUT_DIR, TEMPLATE_PPTX, DEVANAGARI_FONT
+
+
+# Devanagari block (U+0900–U+097F) — used to detect Hindi text runs that the
+# brand Latin fonts (Anton/Poppins) cannot render.
+_DEVANAGARI_RE = re.compile(r'[\u0900-\u097F]')
+
+
+def _force_run_font(run, name: str) -> None:
+    """
+    Force a run to use `name` for the Latin, East-Asian AND complex-script
+    typeface slots.
+
+    PowerPoint picks the COMPLEX-SCRIPT (a:cs) font for Devanagari, while
+    LibreOffice may use a:latin — so we set all three to be safe. python-pptx's
+    `run.font.name` only writes a:latin, so we add a:ea / a:cs at the XML level
+    (they belong AFTER a:latin in the rPr schema order).
+    """
+    run.font.name = name
+    rPr = run._r.get_or_add_rPr()
+    for tag in ("a:ea", "a:cs"):
+        el = rPr.find(qn(tag))
+        if el is None:
+            el = etree.SubElement(rPr, qn(tag))
+        el.set("typeface", name)
+
+
+def _apply_devanagari_fonts(slide) -> None:
+    """
+    Final pass over a finished slide: any text run that contains Devanagari
+    characters is re-assigned to the Devanagari font, since Anton/Poppins have
+    no Hindi glyphs and would otherwise render as tofu boxes (□□□).
+
+    Covers both normal text frames and table cells.
+    """
+    def _fix_text_frame(tf):
+        for para in tf.paragraphs:
+            for run in para.runs:
+                if _DEVANAGARI_RE.search(run.text or ""):
+                    _force_run_font(run, DEVANAGARI_FONT)
+
+    for shape in slide.shapes:
+        if shape.has_text_frame:
+            _fix_text_frame(shape.text_frame)
+        if shape.has_table:
+            for row in shape.table.rows:
+                for cell in row.cells:
+                    _fix_text_frame(cell.text_frame)
+
+
+# Decorative icons placed by layout. Each lives in backend/assets/visuals/.
+_ASSETS_DIR   = os.path.dirname(os.path.dirname(TEMPLATE_PPTX))
+_VISUALS_DIR  = os.path.join(_ASSETS_DIR, "visuals")
+_TOPIC_ICON_PATH   = os.path.join(_VISUALS_DIR, "topic-heading.png")   # topics agenda
+_THEORY_ICON_PATH  = os.path.join(_VISUALS_DIR, "slide-heading.png")   # theory/content
+_SUMMARY_ICON_PATH = os.path.join(_VISUALS_DIR, "summary.png")         # summary slide
+_RECAP_ICON_PATH   = os.path.join(_VISUALS_DIR, "recap.png")           # recap slide
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -402,6 +459,74 @@ def _strip_option_prefix(text: str) -> str:
     return t
 
 
+def _add_heading_icon(slide, heading_shape, sub_shape, icon_path,
+                      icon_height: float = 2.6) -> float:
+    """
+    Place a decorative icon in the far-left margin, vertically aligned to the
+    big heading word, then shift the heading right so the icon and the text
+    never overlap. The icon's aspect ratio is read from the file so wide images
+    (e.g. a "RECAP" wordmark) are never squished.
+
+    Returns the max width (inches) the heading text may now use, so the caller's
+    width-fit keeps the big word clear of the sub-heading box.
+    """
+    from pptx.util import Inches
+
+    DEFAULT_MAX_W = 9.0
+    if heading_shape is None or not os.path.exists(icon_path):
+        return DEFAULT_MAX_W
+
+    # Preserve the icon's real aspect ratio.
+    aspect = 1.0
+    try:
+        from PIL import Image
+        with Image.open(icon_path) as im:
+            aspect = im.size[0] / im.size[1]
+    except Exception:
+        aspect = 1.0
+    icon_w = icon_height * aspect
+
+    ICON_LEFT = 0.7          # far-left margin
+    GAP       = 0.55         # breathing room between icon and text
+
+    heading_top_in = (heading_shape.top or 0) / 914400.0
+    orig_left_in   = (heading_shape.left or 0) / 914400.0
+    # Top-anchored heading text sits a touch below the box top; nudge the icon
+    # down so it visually aligns with the heading glyphs.
+    icon_top = heading_top_in + 0.20
+
+    slide.shapes.add_picture(
+        icon_path,
+        Inches(ICON_LEFT),
+        Inches(icon_top),
+        width=Inches(icon_w),
+        height=Inches(icon_height),
+    )
+
+    # Shift the heading right so it clears the icon, and slide the sub-heading
+    # box by the SAME delta. The template intentionally overlaps the big and
+    # sub boxes, so moving only the big word would push it on top of the sub
+    # word — moving both keeps their original relationship intact.
+    new_left = ICON_LEFT + icon_w + GAP
+    delta = new_left - orig_left_in
+    heading_shape.left = Inches(new_left)
+
+    orig_sub_left = (sub_shape.left / 914400.0) if sub_shape is not None else 12.3
+    if sub_shape is not None and delta > 0:
+        sub_shape.left = Inches(orig_sub_left + delta)
+
+    # Vertically centre the heading text on the icon: match the heading box to
+    # the icon's vertical span and middle-anchor it, so the single title line
+    # sits at the icon's mid-height instead of starting from the top.
+    from pptx.enum.text import MSO_ANCHOR
+    heading_shape.top = Inches(icon_top)
+    heading_shape.height = Inches(icon_height)
+    heading_shape.text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+
+    # Usable width for the big word == its original budget (group moved as one).
+    return max(orig_sub_left - orig_left_in - 0.3, 4.0)
+
+
 def _fill_recap_or_topics(slide, content: SlideContent):
     """
     Slides 1/2 of template share the same shape pattern:
@@ -412,24 +537,11 @@ def _fill_recap_or_topics(slide, content: SlideContent):
     for nicer fit), and feed key_points into the bullets.
     """
     title = content.title.strip()
-    # Split the title into a short "big" first chunk and a "small" remainder.
-    # The big box renders at very large pt with limited horizontal room
-    # (~9 in before the sub-heading box visually starts), so we cap the big
-    # chunk to ~10 chars by walking word boundaries — otherwise a single long
-    # first word ("Categorization") gets a tiny font and looks awkward next to
-    # a fully-empty sub-heading.
-    words = title.split()
-    if not words:
-        big, small = title, ""
-    else:
-        big = words[0]
-        # Allow joining a second short word into the big chunk if the first
-        # word is itself short, so the heading reads naturally.
-        if len(words) > 1 and len(big) + 1 + len(words[1]) <= 10:
-            big = f"{big} {words[1]}"
-            small = " ".join(words[2:])
-        else:
-            small = " ".join(words[1:])
+    # Render the whole title as ONE uniform-size heading line (all words the
+    # same big size, naturally spaced) instead of a big first word + small
+    # remainder. `small` is cleared so the sub-heading box stays empty.
+    big = title
+    small = ""
 
     # Find the two heading textboxes — they're the first two shapes that contain
     # the original placeholder words "Recap"/"Topics" and "of previous"/"to be".
@@ -457,22 +569,44 @@ def _fill_recap_or_topics(slide, content: SlideContent):
             sub_set = True
             sub_shape = shape
 
-    # Width-fit the heading so longer first words don't overlap the
-    # sub-heading box. Template positions: heading box L≈1.63 W≈12.96,
-    # sub box L≈11.14 W≈12.96 — the boxes intentionally overlap. The big
-    # text must stop visually before x≈11 (≈9 in of usable width); the sub
-    # text must fit within its own ≈12 in box.
     YELLOW = RGBColor(0xFF, 0xCC, 0x31)
     base_big = _resolve_font_pt(heading_shape, 90) if heading_shape else 90
     base_small = _resolve_font_pt(sub_shape, 40) if sub_shape else 40
+
+    # Topics & recap slides get a decorative icon on the LEFT of the heading.
+    # Placing it shifts the heading right (the sub box, now empty, follows).
+    heading_max_w = 9.0
+    if content.layout == TemplateType.topics_slide:
+        _add_heading_icon(
+            slide, heading_shape, sub_shape, _TOPIC_ICON_PATH, icon_height=2.6
+        )
+    elif content.layout == TemplateType.recap_slide:
+        _add_heading_icon(
+            slide, heading_shape, sub_shape, _RECAP_ICON_PATH, icon_height=2.0
+        )
+
+    # The whole title now lives in the heading box on one line. Give it a wide
+    # budget from its (possibly icon-shifted) left edge up to a safe right limit
+    # that stays clear of the right-side decorative art, and widen the box so it
+    # never wraps.
+    from pptx.util import Inches
+    RIGHT_LIMIT = 20.0
+    heading_left_in = (heading_shape.left or 0) / 914400.0 if heading_shape else 1.63
+    heading_max_w = max(RIGHT_LIMIT - heading_left_in, 6.0)
+    if heading_shape is not None:
+        heading_shape.width = Inches(heading_max_w + 1.0)
+
+    # Single line, no wrap: shrink the font so the whole title fits the width.
+    # char_width_factor ~0.0080 matches the heading font's real glyph width.
     _apply_heading_style(
         heading_shape,
         text_len=len(big),
         base_pt=base_big,
-        min_pt=72,
+        min_pt=44,
         color=YELLOW,
-        wrap=True,
-        max_width_in=9.0,
+        wrap=False,
+        max_width_in=heading_max_w,
+        char_width_factor=0.0080,
     )
     _apply_heading_style(
         sub_shape,
@@ -506,26 +640,65 @@ def _fill_recap_or_topics(slide, content: SlideContent):
     _clear_unused_placeholders(slide)
 
 
+def _find_backdrop_pill(slide, text_shape):
+    """
+    Find the decorative rounded-rect (the teal/blue "pill") that sits BEHIND the
+    heading text box.
+
+    On the section-heading template the blue pill is a SEPARATE auto-shape — the
+    text box itself is transparent. To widen the blue background for a long
+    heading we must resize that shape, so we locate it as the smallest auto-shape
+    whose bounding box contains the text box's centre and is at least as tall as
+    the text box (this ignores the small circular logo badge to its left).
+    """
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    if text_shape.left is None or text_shape.width is None:
+        return None
+
+    cx = text_shape.left + text_shape.width / 2
+    cy = text_shape.top + text_shape.height / 2
+
+    best = None
+    best_area = None
+    for sh in slide.shapes:
+        if sh is text_shape:
+            continue
+        if sh.shape_type != MSO_SHAPE_TYPE.AUTO_SHAPE:
+            continue
+        if sh.left is None or sh.top is None or sh.width is None or sh.height is None:
+            continue
+        within = (sh.left <= cx <= sh.left + sh.width) and (sh.top <= cy <= sh.top + sh.height)
+        if not within or sh.height < text_shape.height:
+            continue
+        area = sh.width * sh.height
+        if best is None or area < best_area:
+            best = sh
+            best_area = area
+    return best
+
+
 def _fill_section_heading(slide, content: SlideContent):
     """
-    Replace 'Type Heading Here' with the section title.
+    Replace 'Type Heading Here' with the section title, keeping it on ONE LINE
+    that always sits inside the blue rounded-rect pill.
 
-    The template's heading is a teal rounded-rect pill (12.99 × 1.51 in) at
-    (6.11, 2.24). The default 84pt font only fits very short titles like
-    "Recap" — longer titles such as "Previous Year Questions (SSC CPO - 2019)"
-    wrap to 3 lines and spill below the pill. We:
+    The blue pill is a SEPARATE decorative auto-shape behind a transparent text
+    box. Wrapping the title to a 2nd/3rd line is what used to push text out of
+    the pill — so we never wrap. Instead, for longer titles we:
 
-      1. Pick a font size that fits the title on ONE line within the pill's
-         available width (with a small inner padding so text never kisses
-         the rounded ends).
-      2. If the resulting size would be smaller than `_MIN_TITLE_PT`, widen
-         the pill horizontally up to a hard right-edge bound (so it never
-         collides with the top-right PW badge) and re-fit.
-      3. Grow the pill's height to accommodate a 2-line wrap only when even
-         the widened pill can't render the title at a readable size.
+      1. Leave short titles exactly as the template designed them.
+      2. EXPAND the blue pill (and its text box) to the right — up to a bound
+         that clears the top-right badge — so the bigger heading fits on one
+         line inside the blue background.
+      3. Only if the widest the pill can grow STILL isn't enough, SHRINK the
+         font so the whole title fits that single line.
+
+    This is applied per-heading, so only the long ones grow / shrink.
     """
-    from pptx.util import Inches, Pt, Emu
+    from pptx.util import Inches, Pt
     from pptx.dml.color import RGBColor
+    from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 
     text = (content.title or "").strip()
     _replace_first(slide, "Type Heading Here", text)
@@ -540,54 +713,105 @@ def _fill_section_heading(slide, content: SlideContent):
             target_shape = shape
             break
 
-    if target_shape is None:
+    if target_shape is None or not text:
         _clear_unused_placeholders(slide)
         return
 
     base_pt = _resolve_font_pt(target_shape, 84)
     text_len = max(len(text), 1)
 
-    # Poppins-bold renders wider than Anton; use a font-appropriate factor.
-    CHAR_W = 0.0080
-    INNER_PAD_IN = 1.2        # leave room for rounded ends
-    _ONE_LINE_MIN_PT = 56     # below this on one line, prefer a 2-line wrap
+    # Conservative glyph width — LibreOffice substitutes a wider bold sans for
+    # the brand font on export, so text renders longer than a naive estimate.
+    CHAR_W = 0.0115
+    EDGE_PAD_IN = 1.1         # clearance from the pill's rounded ends
+    RIGHT_BOUND_IN = 35.4     # keep clear of the top-right PW badge (~36.6in)
     _ABS_MIN_TITLE_PT = 36    # last-resort floor
 
-    cur_width_in = target_shape.width / 914400
-    cur_height_in = target_shape.height / 914400
+    tb_top_in = target_shape.top / 914400
+    tb_h_in   = target_shape.height / 914400
 
-    def _fit_pt(width_in: float, lines: int = 1) -> int:
-        usable = max(width_in - INNER_PAD_IN, 1.0)
-        chars_per_line = max(text_len / lines, 1)
-        return int(usable / (chars_per_line * CHAR_W))
+    pill = _find_backdrop_pill(slide, target_shape)
+    if pill is not None:
+        pill_left_in = pill.left / 914400
+        pill_w_in    = pill.width / 914400
+        pill_top_in  = pill.top / 914400
+        pill_h_in    = pill.height / 914400
+    else:
+        pill_left_in = target_shape.left / 914400
+        pill_w_in    = target_shape.width / 914400
+        pill_top_in  = tb_top_in
+        pill_h_in    = tb_h_in
 
-    # 1. Try one line at the pill's existing width.
-    fit_pt = _fit_pt(cur_width_in, lines=1)
-    use_two_lines = False
+    # Width the title needs on ONE line at the template's base font.
+    needed_w = text_len * base_pt * CHAR_W + 2 * EDGE_PAD_IN
+    max_pill_w = max(RIGHT_BOUND_IN - pill_left_in, pill_w_in)
 
-    if fit_pt < _ONE_LINE_MIN_PT:
-        # 2. Two-line wrap at the same width — usually yields a larger, more
-        #    readable font than cramming everything onto one tiny line.
-        two_line_pt = _fit_pt(cur_width_in, lines=2)
-        if two_line_pt > fit_pt:
-            fit_pt = two_line_pt
-            use_two_lines = True
+    chosen_pt = base_pt
+    if needed_w <= pill_w_in:
+        # Short title — already fits the existing pill; leave geometry as-is.
+        new_pill_w = pill_w_in
+    elif needed_w <= max_pill_w:
+        # Longer title — EXPAND the blue pill to fit it at full size.
+        new_pill_w = needed_w
+    else:
+        # Too long even for the widest pill — expand to the max, then SHRINK
+        # the font so the whole title still fits on this one line.
+        new_pill_w = max_pill_w
+        usable = max(new_pill_w - 2 * EDGE_PAD_IN, 1.0)
+        chosen_pt = max(int(usable / (text_len * CHAR_W)), _ABS_MIN_TITLE_PT)
 
-    target_pt = max(min(base_pt, fit_pt), _ABS_MIN_TITLE_PT)
+    # Apply the new width to the blue pill (keep its left/top), then lay the text
+    # box over it with padding so the single line centres inside the blue area.
+    if pill is not None and abs(new_pill_w - pill_w_in) > 0.01:
+        pill.width = Inches(new_pill_w)
 
-    # Grow the pill's height only when we deliberately wrap to two lines, so
-    # the second line stays inside the teal rounded rectangle.
-    if use_two_lines:
-        # Line-height ~1.15× font size plus a small vertical pad.
-        new_h_in = max(cur_height_in, target_pt / 72.0 * 2 * 1.15 + 0.30)
-        target_shape.height = Inches(new_h_in)
+    target_shape.left = Inches(pill_left_in + EDGE_PAD_IN)
+    target_shape.width = Inches(max(new_pill_w - 2 * EDGE_PAD_IN, 1.0))
+    target_shape.top = Inches(pill_top_in)
+    target_shape.height = Inches(pill_h_in)
 
     tf = target_shape.text_frame
-    tf.word_wrap = True
+    tf.word_wrap = False          # never wrap — the title stays on one line
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
     for para in tf.paragraphs:
+        para.alignment = PP_ALIGN.CENTER
         for run in para.runs:
-            run.font.size = Pt(target_pt)
+            run.font.size = Pt(chosen_pt)
             run.font.color.rgb = YELLOW
+
+    # Decorative icon INSIDE the blue pill, on the LEFT of the heading text.
+    # The pill is widened to the right to make room (clamped to the badge bound)
+    # so the title keeps its space, and the text is re-centred to the icon's
+    # right.
+    if os.path.exists(_THEORY_ICON_PATH):
+        aspect = 1.0
+        try:
+            from PIL import Image
+            with Image.open(_THEORY_ICON_PATH) as im:
+                aspect = im.size[0] / im.size[1]
+        except Exception:
+            pass
+
+        pad_v  = 0.45
+        icon_h = max(pill_h_in - 2 * pad_v, 0.6)
+        icon_w = icon_h * aspect
+        icon_l = pill_left_in + 0.6
+        icon_t = pill_top_in + (pill_h_in - icon_h) / 2.0
+
+        extended_w = min(new_pill_w + icon_w + 0.5, RIGHT_BOUND_IN - pill_left_in)
+        if pill is not None:
+            pill.width = Inches(extended_w)
+
+        slide.shapes.add_picture(
+            _THEORY_ICON_PATH,
+            Inches(icon_l), Inches(icon_t),
+            width=Inches(icon_w), height=Inches(icon_h),
+        )
+
+        text_left  = icon_l + icon_w + 0.4
+        text_right = pill_left_in + extended_w - EDGE_PAD_IN
+        target_shape.left  = Inches(text_left)
+        target_shape.width = Inches(max(text_right - text_left, 1.0))
 
     _clear_unused_placeholders(slide)
 
@@ -709,6 +933,17 @@ def _fill_theory_slide(slide, content: SlideContent):
     tag_l = 1.0
     tag_t = 0.8
 
+    # Decorative icon to the LEFT of the title tag; shift the tag right to clear it.
+    if os.path.exists(_TOPIC_ICON_PATH):
+        icon_size = tag_h
+        icon_left = 0.8
+        slide.shapes.add_picture(
+            _TOPIC_ICON_PATH,
+            Inches(icon_left), Inches(tag_t),
+            width=Inches(icon_size), height=Inches(icon_size),
+        )
+        tag_l = icon_left + icon_size + 0.4
+
     tag = slide.shapes.add_shape(
         MSO_SHAPE.ROUNDED_RECTANGLE,
         Inches(tag_l), Inches(tag_t), Inches(tag_w), Inches(tag_h),
@@ -796,7 +1031,7 @@ def _fill_theory_slide(slide, content: SlideContent):
             run_t.text = text
             run_t.font.size = Pt(body_pt)
             run_t.font.name = "Poppins"
-            run_t.font.color.rgb = WHITE
+            run_t.font.color.rgb = YELLOW
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1296,7 +1531,7 @@ def _fill_theory_table_slide(slide, content: SlideContent):
             run_t.text = text
             run_t.font.size = Pt(bullet_pt)
             run_t.font.name = "Poppins"
-            run_t.font.color.rgb = WHITE
+            run_t.font.color.rgb = YELLOW
 
     # Table sits below the bullets block.
     table_top = bullets_top + BULLETS_MAX_H + 0.4
@@ -1708,7 +1943,8 @@ def _fill_thank_you(slide, content: SlideContent):
     _clear_unused_placeholders(slide)
 
 
-def _add_bullets_textbox(slide, bullets, top_in=6.0, font_pt=40):
+def _add_bullets_textbox(slide, bullets, top_in=6.0, font_pt=40,
+                         left_in=1.5, width_in=37.0):
     """
     Append a simple bullets textbox below the heading. Used for summary /
     homework where the template only has a small title and no body area.
@@ -1719,7 +1955,7 @@ def _add_bullets_textbox(slide, bullets, top_in=6.0, font_pt=40):
     from pptx.util import Inches
     from pptx.dml.color import RGBColor
     tb = slide.shapes.add_textbox(
-        Inches(1.5), Inches(top_in), Inches(37.0), Inches(15.0)
+        Inches(left_in), Inches(top_in), Inches(width_in), Inches(15.0)
     )
     tf = tb.text_frame
     tf.word_wrap = True
@@ -1733,12 +1969,55 @@ def _add_bullets_textbox(slide, bullets, top_in=6.0, font_pt=40):
         run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
 
 
+def _add_summary_illustration(slide, top_after_text: float):
+    """
+    Place the recap image as a WIDE banner across the BOTTOM of the summary
+    slide (about half the slide width), centred horizontally and sitting below
+    the last line of text (`top_after_text`) with a margin. Aspect ratio is
+    preserved.
+    """
+    from pptx.util import Inches
+
+    if not os.path.exists(_RECAP_ICON_PATH):
+        return
+
+    aspect = 1.834
+    try:
+        from PIL import Image
+        with Image.open(_RECAP_ICON_PATH) as im:
+            aspect = im.size[0] / im.size[1]
+    except Exception:
+        pass
+
+    SLIDE_W, SLIDE_BOTTOM, MARGIN = 40.0, 21.8, 1.0
+    img_w = 18.0                                     # ~half the slide width
+    img_h = img_w / aspect
+    img_l = (SLIDE_W - img_w) / 2.0                  # centred horizontally
+    img_t = top_after_text + MARGIN                  # below the last text line
+    img_t = min(img_t, SLIDE_BOTTOM - img_h)         # keep it on the slide
+
+    slide.shapes.add_picture(
+        _RECAP_ICON_PATH,
+        Inches(img_l), Inches(img_t),
+        width=Inches(img_w), height=Inches(img_h),
+    )
+
+
 def _fill_summary_or_homework(slide, content: SlideContent):
     """Template only has heading; add a body textbox for the points."""
-    if content.bullets:
-        from pipeline.fit_engine import pick_body_font
-        font_pt = pick_body_font(content.bullets, content.layout)
-        _add_bullets_textbox(slide, content.bullets, top_in=6.0, font_pt=font_pt)
+    if not content.bullets:
+        return
+    from pipeline.fit_engine import pick_body_font
+    font_pt = pick_body_font(content.bullets, content.layout)
+
+    # Summary slides keep all text full-width at the top, then show the recap
+    # image as a wide banner across the bottom below the last line.
+    _add_bullets_textbox(slide, content.bullets, top_in=6.0, font_pt=font_pt)
+
+    if content.layout == TemplateType.summary and os.path.exists(_RECAP_ICON_PATH):
+        n = len(content.bullets)
+        points_bottom = 6.0 + n * (font_pt / 72.0 * 1.25 + 0.25)  # estimated text end
+        _add_summary_illustration(slide, points_bottom)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1879,6 +2158,7 @@ def generate_pptx(
             _apply_content(new_slide, content, context)
             _remove_explicit_top_left_logo(new_slide)
             _add_top_right_badge(new_slide)
+            _apply_devanagari_fonts(new_slide)
 
             print(f"    Slide {content.slide_number:2d} [{content.layout.value:18s}] — "
                   f"{content.title[:55]}")

@@ -62,6 +62,18 @@ TASK 1 — Extract ALL textual content into `main_text`
   watermarks, and any text that's clearly bleed-through from an adjacent
   page or column.
 
+LANGUAGE / SCRIPT PRESERVATION (critical):
+  • Transcribe text in the EXACT language and script shown on the page.
+    If the page is in Hindi (Devanagari), keep it in Devanagari. If it mixes
+    Hindi and English, keep BOTH exactly as written — do NOT translate,
+    transliterate, or "normalise" one into the other.
+  • NEVER translate Hindi → English or English → Hindi during extraction.
+    Your job is faithful transcription, not translation. A downstream agent
+    decides the output language; you must preserve the original verbatim.
+  • Set `detected_language` to "hi" if the page is mostly Hindi/Devanagari,
+    "en" if mostly English/Latin, or "mixed" if it contains a meaningful
+    amount of both.
+
 CURRENCY / SYMBOL ORDERING (critical):
   Currency symbols (₹, $, €, £) ALWAYS go BEFORE the number:
     ✓  ₹25 Crore      ✓  ₹71.375 Crore     ✓  $5,000

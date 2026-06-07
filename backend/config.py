@@ -80,3 +80,10 @@ VISUAL_CRITIC_SKIP = os.getenv("VISUAL_CRITIC_SKIP", "false").lower() == "true"
 # Style memory
 MEMORY_DIR = os.path.join(os.path.dirname(__file__), "memory")
 STYLE_YAML = os.path.join(MEMORY_DIR, "style.yaml")
+
+# Devanagari (Hindi) rendering — the brand fonts (Anton/Poppins) have NO
+# Devanagari glyphs, so any Hindi text run is re-assigned to this font. The
+# host running LibreOffice / PowerPoint must have a Devanagari font available;
+# override via env if your deploy box ships a different one (e.g.
+# "Lohit Devanagari", "Mangal", "Kohinoor Devanagari").
+DEVANAGARI_FONT = os.getenv("DEVANAGARI_FONT", "Noto Sans Devanagari")

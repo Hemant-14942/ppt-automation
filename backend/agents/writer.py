@@ -176,12 +176,31 @@ def _normalize_theory_bullets(bullets: list[str]) -> list[str]:
 
 def _language_rule(context: PDFContext) -> str:
     rules = {
+        "Same as source":  "PRESERVE THE SOURCE LANGUAGE EXACTLY. Reproduce each "
+                           "point in the SAME language and script as it appears in "
+                           "the source — keep Hindi in Devanagari and English in "
+                           "Latin. If a sentence mixes Hindi and English, keep it "
+                           "mixed exactly as written. Do NOT translate, "
+                           "transliterate, or convert one language into the other.",
         "English":         "Write all content in clear English.",
-        "Hindi":           "Write all content in Hindi using Devanagari script.",
-        "Hinglish":        "Write in Hinglish — mix of Hindi and English as teachers naturally speak.",
+        "Hindi":           "Write all content in Hindi using Devanagari script. "
+                           "Keep widely-used English technical terms (formulas, "
+                           "proper nouns, units) as-is rather than forcing awkward "
+                           "translations.",
+        "Hinglish":        "Write in Hinglish — a natural mix of Hindi (Devanagari) "
+                           "and English as teachers actually speak, keeping technical "
+                           "terms in English.",
         "Regional language": "Write in simple language mixing English technical terms where needed.",
     }
     return rules.get(context.language, "Write in clear English.")
+
+
+def _language_directive(context: PDFContext) -> str:
+    """Short imperative used in the GLOBAL RULES block (avoids 'Write in Same as source')."""
+    if context.language == "Same as source":
+        return ("Preserve the source language(s) and script(s) verbatim — do NOT "
+                "translate Hindi to English or vice-versa.")
+    return f"Write in {context.language}."
 
 
 def _level_rule(context: PDFContext) -> str:
@@ -460,7 +479,7 @@ GLOBAL RULES:
 - Match terminology used across the full outline.
 - Do NOT introduce concepts outside your assigned key_points.
 - Set `layout` in the output to the same template name shown above.
-- Write in {context.language}.
+- {_language_directive(context)}
 
 ANTI-HALLUCINATION — SOURCE FIDELITY (CRITICAL):
 - Use ONLY facts, numbers, and formulas that appear in the SOURCE CONTENT below.

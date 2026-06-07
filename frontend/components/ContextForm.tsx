@@ -147,6 +147,7 @@ export default function ContextForm({ context, onChange }: ContextFormProps) {
               value={context.language}
               onChange={(e) => set("language", e.target.value)}
             >
+              <option value="Same as source">Same as source (keep original)</option>
               <option value="English">English</option>
               <option value="Hindi">Hindi</option>
               <option value="Hinglish">Hinglish</option>

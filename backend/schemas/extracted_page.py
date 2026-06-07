@@ -56,6 +56,7 @@ class ExtractedPage(BaseModel):
     should_skip:        bool
     has_table:          bool = False
     table_description:  Optional[str] = None
+    detected_language:  Optional[str] = None   # "hi" / "en" / "mixed"
 
     @field_validator('main_text', mode='before')
     @classmethod
