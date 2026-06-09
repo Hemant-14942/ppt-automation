@@ -174,6 +174,22 @@ def pick_body_font(bullets: list[str], layout: TemplateType) -> int:
     return cap.font_min
 
 
+def consistent_body_font(layout: TemplateType, strategy: DeckStrategy | None = None) -> int:
+    """
+    A SINGLE body font size used for EVERY slide of `layout` in the deck.
+
+    Unlike `pick_body_font` (which maximises per slide, so sparse slides render
+    bigger than dense ones — a visible inconsistency across the deck), this
+    returns the deck's fixed pack font. Reflow splits content so each chunk fits
+    at exactly this size, so rendering here is guaranteed not to overflow while
+    keeping every slide's bullets the same readable size.
+    """
+    cap = _CAPACITY.get(layout)
+    if cap is None or cap.mode != "free":
+        return 40
+    return _pack_font_for(cap, strategy)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Splitting
 # ─────────────────────────────────────────────────────────────────────────────

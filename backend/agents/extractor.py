@@ -4,8 +4,52 @@ from google.genai import types
 from agents.gemini_client import client
 from schemas.extracted_page import ExtractedPage
 from schemas.request import PDFContext
-from config import EXTRACTION_MODEL, MAX_CONCURRENT_AGENTS
-from pipeline.token_tracker import record_usage
+from config import (
+    EXTRACTION_MODEL,
+    EXTRACTION_RETRY_MODEL,
+    MAX_CONCURRENT_AGENTS,
+    MAX_EXTRACTION_RETRIES,
+    MAX_EXTRACTION_OUTPUT_TOKENS,
+)
+from pipeline.token_tracker import record_api_attempt, record_api_failure, record_usage
+
+
+# Substrings that mark a TRANSIENT (worth-retrying) failure: rate limits,
+# server hiccups, timeouts. Anything else (bad request, parse error) is not
+# retried — retrying would just waste an API call.
+_TRANSIENT_MARKERS = (
+    "429", "resource_exhausted", "rate limit", "quota",
+    "503", "500", "unavailable", "deadline", "timeout", "servererror",
+)
+
+
+def _is_transient(err: Exception) -> bool:
+    """True if the error looks transient and a retry might succeed."""
+    blob = f"{type(err).__name__} {err!r}".lower()
+    return any(m in blob for m in _TRANSIENT_MARKERS)
+
+
+def _log_extraction_failure(page_no: int, err: Exception | None, response) -> None:
+    """
+    Print the REAL reason a page failed — never a blank line.
+
+    Shows the exception type + repr AND Gemini's own finish_reason /
+    prompt_feedback, which is what distinguishes a rate limit (429) from a
+    truncated dense page (MAX_TOKENS) from a safety block.
+    """
+    if err is not None:
+        print(f"  Page {page_no} — FAILED [{type(err).__name__}]: {err!r}")
+    else:
+        print(f"  Page {page_no} — FAILED: empty/blocked response (nothing to parse)")
+
+    if response is not None:
+        fb = getattr(response, "prompt_feedback", None)
+        if fb:
+            print(f"      prompt_feedback: {fb}")
+        for cand in (getattr(response, "candidates", None) or []):
+            fr = getattr(cand, "finish_reason", None)
+            if fr is not None:
+                print(f"      finish_reason: {fr}")
 
 
 def build_extraction_prompt(context: PDFContext) -> str:
@@ -158,38 +202,69 @@ async def _extract_page_async(
     Semaphore limits concurrent calls to stay within Gemini rate limits.
     """
     async with semaphore:
+        page_no = page_dict["page_number"]
         prompt = build_extraction_prompt(context)
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
-            response_schema=ExtractedPage
+            response_schema=ExtractedPage,
+            max_output_tokens=MAX_EXTRACTION_OUTPUT_TOKENS,
         )
-        try:
-            response = await client.aio.models.generate_content(
-                model=EXTRACTION_MODEL,
-                contents=[
-                    prompt,
-                    types.Part.from_bytes(
-                        data=base64.b64decode(page_dict["base64"]),
-                        mime_type=page_dict["mime_type"]
-                    )
-                ],
-                config=config
-            )
-            record_usage("extraction", response.usage_metadata)
-            extracted = response.parsed
+        contents = [
+            prompt,
+            types.Part.from_bytes(
+                data=base64.b64decode(page_dict["base64"]),
+                mime_type=page_dict["mime_type"],
+            ),
+        ]
 
-        except Exception as e:
-            print(f"  Page {page_dict['page_number']} — failed: {e}")
+        # 1 initial attempt + at most MAX_EXTRACTION_RETRIES retries, but ONLY
+        # for transient errors (rate limit / server / timeout). A retry uses one
+        # more API call, so it's also reflected in the final cost summary.
+        response = None
+        for attempt in range(MAX_EXTRACTION_RETRIES + 1):
+            model = EXTRACTION_RETRY_MODEL if attempt > 0 else EXTRACTION_MODEL
+            try:
+                record_api_attempt("extraction", model)
+                response = await client.aio.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=config,
+                )
+                break
+            except Exception as e:
+                record_api_failure("extraction", model)
+                if attempt < MAX_EXTRACTION_RETRIES and _is_transient(e):
+                    wait = 2.0 * (attempt + 1)
+                    print(f"  Page {page_no} — transient error [{type(e).__name__}], "
+                          f"retry {attempt + 1}/{MAX_EXTRACTION_RETRIES} "
+                          f"with {EXTRACTION_RETRY_MODEL} in {wait:.0f}s")
+                    await asyncio.sleep(wait)
+                    continue
+                # Out of retries (or non-transient): log the REAL reason.
+                _log_extraction_failure(page_no, e, None)
+                return None
+
+        # Record token usage for EVERY response we received — even one that
+        # later fails to parse still consumed (billable) tokens, so it must
+        # show up in the terminal cost / API-call summary.
+        if response is not None:
+            record_usage("extraction", response.usage_metadata, model=model)
+
+        extracted = response.parsed if response is not None else None
+        if extracted is None:
+            # Truncated (MAX_TOKENS), blocked, or otherwise unparseable — the
+            # finish_reason printed here tells us which.
+            _log_extraction_failure(page_no, None, response)
             return None
 
         # trust our page numbering, not Gemini's
-        extracted.page_number = page_dict["page_number"]
+        extracted.page_number = page_no
 
         if extracted.should_skip:
-            print(f"  Page {page_dict['page_number']} — skipped (blank/irrelevant)")
+            print(f"  Page {page_no} — skipped (blank/irrelevant)")
             return None
 
-        print(f"  Page {page_dict['page_number']} — extracted OK")
+        print(f"  Page {page_no} — extracted OK")
         return extracted
 
 
@@ -213,15 +288,24 @@ async def extract_all_pages_async(
     raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
     extracted = []
+    errored = 0
     for i, result in enumerate(raw_results):
         if isinstance(result, Exception):
-            print(f"  Page {i + 1} — error: {result}")
+            errored += 1
+            print(f"  Page {pages[i]['page_number']} — error "
+                  f"[{type(result).__name__}]: {result!r}")
         elif result is not None:
             extracted.append(result)
 
     # sort by page number — parallel calls return out of order
     extracted.sort(key=lambda p: p.page_number)
+
+    dropped = len(pages) - len(extracted)
     print(f"\n  Extraction done — {len(extracted)} useful pages from {len(pages)} total")
+    if dropped:
+        # Skipped (blank) pages are expected; errored pages are real losses.
+        print(f"  ⚠ {dropped} page(s) not extracted "
+              f"({errored} hard error(s); rest skipped as blank/irrelevant)")
     return extracted
 
 
@@ -229,12 +313,16 @@ async def extract_all_pages_async(
 
 def extract_page(page_dict: dict, context: PDFContext) -> ExtractedPage | None:
     """Sync single-page extraction — kept as fallback."""
+    page_no = page_dict["page_number"]
     prompt = build_extraction_prompt(context)
     config = types.GenerateContentConfig(
         response_mime_type="application/json",
-        response_schema=ExtractedPage
+        response_schema=ExtractedPage,
+        max_output_tokens=MAX_EXTRACTION_OUTPUT_TOKENS,
     )
+    response = None
     try:
+        record_api_attempt("extraction", EXTRACTION_MODEL)
         response = client.models.generate_content(
             model=EXTRACTION_MODEL,
             contents=[
@@ -246,14 +334,20 @@ def extract_page(page_dict: dict, context: PDFContext) -> ExtractedPage | None:
             ],
             config=config
         )
-        extracted = response.parsed
+        record_usage("extraction", response.usage_metadata, model=EXTRACTION_MODEL)
     except Exception as e:
-        print(f"  Page {page_dict['page_number']} — failed: {e}")
+        record_api_failure("extraction", EXTRACTION_MODEL)
+        _log_extraction_failure(page_no, e, None)
         return None
 
-    extracted.page_number = page_dict["page_number"]
+    extracted = response.parsed
+    if extracted is None:
+        _log_extraction_failure(page_no, None, response)
+        return None
+
+    extracted.page_number = page_no
     if extracted.should_skip:
-        print(f"  Page {page_dict['page_number']} — skipped")
+        print(f"  Page {page_no} — skipped")
         return None
     return extracted
 

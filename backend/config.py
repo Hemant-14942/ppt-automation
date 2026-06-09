@@ -15,15 +15,24 @@ FRONTEND_ORIGINS = [
 ]
 
 # Models
-EXTRACTION_MODEL   = "gemini-2.5-flash"
-PLANNING_MODEL     = "gemini-2.5-pro"
-WRITING_MODEL      = "gemini-2.5-flash"
-CRITIC_MODEL       = "gemini-2.5-pro"
+EXTRACTION_MODEL       = "gemini-3.5-flash"
+EXTRACTION_RETRY_MODEL = "gemini-3.1-pro"   # escalated model for the single retry attempt
+PLANNING_MODEL     = "gemini-3.1-pro"
+WRITING_MODEL      = "gemini-3.5-flash"
+CRITIC_MODEL       = "gemini-2.5-pro"    # legacy alias — prefer the 3 below
+
+# Split critic models — lets each agent use the right tier independently:
+#   PLAN_CRITIC_MODEL  : one-shot, high-reasoning (plan structure, style)
+#   SLIDE_CRITIC_MODEL : per-slide faithfulness + visual checks
+#   LAYOUT_MODEL       : per-slide layout classification (simple task)
+PLAN_CRITIC_MODEL  = "gemini-3.1-pro"
+SLIDE_CRITIC_MODEL = "gemini-3.5-flash"
+LAYOUT_MODEL       = "gemini-3.5-flash"
 ORCHESTRATOR_MODEL = "gemini-2.5-flash"
-PROFILER_MODEL     = "gemini-2.5-flash"  
+PROFILER_MODEL     = "gemini-3.5-flash"  
 
 # PDF
-PDF_DPI = 110
+PDF_DPI = 150
 
 # PPT
 STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local").lower()
@@ -62,7 +71,23 @@ MAX_SLIDES            = 500
 MIN_SLIDES            = 3
 MAX_BULLETS           = 5
 MAX_BULLET_WORDS      = 12          # bullets longer than this get trimmed by QC
-MAX_CONCURRENT_AGENTS = 20          # max parallel Gemini calls — stays within rate limits
+MAX_CONCURRENT_AGENTS = 15          # max parallel Gemini calls — stays within rate limits
+
+# Extraction resilience
+# A page extraction may fail on a TRANSIENT error (rate limit 429, 503, timeout).
+# We retry at most this many times before giving up on that page. Kept at 1 so a
+# blip is recovered without hammering the API.
+MAX_EXTRACTION_RETRIES = 1
+# Output-token budget for ONE page's JSON. Dense pages (long comprehension
+# passages + MCQs) can otherwise truncate mid-JSON (finish_reason=MAX_TOKENS),
+# which makes the parse return None and the page silently drop.
+MAX_EXTRACTION_OUTPUT_TOKENS = 8192
+
+# Faithfulness critic resilience. Large decks can send 100+ critic calls; if one
+# call stalls, the whole gather() used to look stuck. Timeout fail-opens that
+# slide and lets the pipeline continue.
+FAITHFULNESS_TIMEOUT_SECONDS = int(os.getenv("FAITHFULNESS_TIMEOUT_SECONDS", "75"))
+FAITHFULNESS_PROGRESS_EVERY = int(os.getenv("FAITHFULNESS_PROGRESS_EVERY", "10"))
 
 # Visual critic — max CONTENT-REWRITE rounds after the initial full-deck pass
 # (Phase 3: raised from 1 so the loop can actually converge on hard slides).

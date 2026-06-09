@@ -882,7 +882,7 @@ def _is_solution_slide(content: SlideContent) -> bool:
     return t.startswith("solution") and (len(t) < 9 or t[8:9] in (':', ' ', '-', '—'))
 
 
-def _fill_theory_slide(slide, content: SlideContent):
+def _fill_theory_slide(slide, content: SlideContent, strategy=None):
     """
     Theory / concept layout built on top of the blank dark slide (template idx 3).
 
@@ -989,11 +989,12 @@ def _fill_theory_slide(slide, content: SlideContent):
         return
 
     # Body font size comes from the shared fit engine so the generator and the
-    # reflow/pagination engine always agree on capacity. The reflow pass has
-    # already split this slide so its bullets fit; pick_body_font then renders
-    # them at the largest font that fits the box height.
-    from pipeline.fit_engine import pick_body_font
-    body_pt = pick_body_font(bullets, TemplateType.theory_slide)
+    # reflow/pagination engine always agree on capacity. We use the deck's fixed
+    # pack font (consistent_body_font) — the SAME size reflow used to split this
+    # slide — so EVERY theory slide renders its bullets at an identical, readable
+    # size instead of each slide picking its own "largest that fits".
+    from pipeline.fit_engine import consistent_body_font
+    body_pt = consistent_body_font(TemplateType.theory_slide, strategy)
 
     body_tb = slide.shapes.add_textbox(body_left, body_top, body_width, body_height)
     bt = body_tb.text_frame
@@ -1052,6 +1053,12 @@ def _fit_title_tag(title: str) -> tuple[int, float, float]:
     Fix: use a conservative char-width, allow the pill to grow up to a hard
     right-edge bound (keeping clear of the top-right PW badge at ~36.6in), and
     only then step the font down. The pill is always sized to contain the text.
+
+    CONSISTENCY: every title starts from the same TARGET size (not the old 72pt
+    "as big as it fits"), so the vast majority of headings — which are short —
+    all render at exactly TARGET. We only step the font DOWN for a genuinely
+    long title that would otherwise overflow the pill. This keeps heading sizes
+    uniform across the deck instead of jumping 72 → 64 → 56 per slide.
     """
     PAD_X = 0.6
     PAD_Y = 0.20
@@ -1061,8 +1068,9 @@ def _fit_title_tag(title: str) -> tuple[int, float, float]:
     budget = USABLE_MAX_W - 2 * PAD_X - SAFETY
 
     n = max(len(title), 1)
+    # Fixed target so headings are consistent; only shrink when too long to fit.
     title_pt = 28
-    for candidate_pt in (72, 64, 56, 48, 42, 36, 32, 28):
+    for candidate_pt in (54, 48, 42, 36, 32, 28):
         if n * candidate_pt * char_w <= budget:
             title_pt = candidate_pt
             break
@@ -1439,7 +1447,7 @@ def _fill_table_slide(slide, content: SlideContent):
     )
 
 
-def _fill_theory_table_slide(slide, content: SlideContent):
+def _fill_theory_table_slide(slide, content: SlideContent, strategy=None):
     """
     Theory bullets ABOVE a small table on the blank dark template (idx 3).
 
@@ -1467,7 +1475,7 @@ def _fill_theory_table_slide(slide, content: SlideContent):
 
     # If there's no table at all, fall through to the plain theory layout.
     if not table_data or not table_data.headers or not table_data.rows:
-        _fill_theory_slide(slide, content)
+        _fill_theory_slide(slide, content, strategy)
         return
 
     # If there are no bullets, prefer the cleaner table-only layout.
@@ -1815,9 +1823,212 @@ def _sanitize_question_title(text: str) -> str:
     return t
 
 
+def _shapes_with_text(slide, needle: str):
+    """Return shapes whose text frame contains `needle`."""
+    out = []
+    for shape in slide.shapes:
+        if shape.has_text_frame and needle in shape.text_frame.text:
+            out.append(shape)
+    return out
+
+
+def _set_textbox_font_size(shape, size_pt: int) -> None:
+    """Apply one font size to every run in a text box."""
+    for para in shape.text_frame.paragraphs:
+        for run in para.runs:
+            run.font.size = Pt(size_pt)
+
+
+def _estimated_wrapped_lines(text: str, font_pt: int, width_in: float) -> int:
+    """
+    Conservative line estimate for Poppins on the 40in canvas.
+    Used only to decide whether a question needs extra vertical room.
+    """
+    chars_per_line = max(18, int(width_in / (font_pt * 0.0095)))
+    return max(1, math.ceil(len(text) / chars_per_line))
+
+
+# Easy knobs for long vertical MCQ question text. If a future long
+# Assertion/Reason question looks too small/big, change these two values.
+LONG_MCQ_QUESTION_FONT_PT = 60
+VERY_LONG_MCQ_QUESTION_FONT_PT = 60
+LONG_MCQ_QUESTION_THRESHOLD = 170
+VERY_LONG_MCQ_QUESTION_THRESHOLD = 260
+LONG_MCQ_MAX_QUESTION_HEIGHT_IN = 7.0
+
+# ── Easy knobs for LONG vertical MCQ OPTIONS ─────────────────────────────────
+# These only kick in when at least one option wraps to a 3rd line at the
+# template's default option width. Short options keep the exact template look.
+#   • WIDTH:   default template option box = 15.82in. We widen it a *little* so
+#              a 3-line option becomes 2 lines. Increase for fewer lines.
+#   • TRIGGER: how many estimated lines (at default width) before we adapt.
+#   • GAP:     vertical breathing space between options when we reflow them.
+#   • FONT:    options stay at template 54pt; only shrinks as a last resort if
+#              the reflowed options would run off the bottom of the slide.
+MCQ_OPTION_DEFAULT_WIDTH_IN = 15.82   # template width (don't change)
+MCQ_OPTION_WIDENED_WIDTH_IN = 24.0    # ← widen long options to this (try 20–26)
+MCQ_OPTION_TRIGGER_LINES    = 3       # ← act only when an option hits this many lines
+MCQ_OPTION_FONT_PT          = 54      # template option font
+MCQ_OPTION_GAP_IN           = 0.55    # ← extra gap between options when reflowing
+MCQ_OPTION_LINE_HEIGHT_FACTOR = 1.2   # line height multiple (leave as is)
+MCQ_OPTION_BAND_BOTTOM_IN   = 21.2    # keep options above this line
+MCQ_OPTION_MIN_FONT_PT      = 44      # last-resort shrink floor
+
+
+def _apply_long_vertical_mcq_layout(slide, question_shape, option_shapes, question: str) -> None:
+    """
+    Long Assertion/Reason MCQs can wrap into the fixed option area. For those
+    rare cases only, shrink the question slightly, give it more height, and
+    push the whole option band (labels + option text) downward.
+    """
+    if not question_shape or not option_shapes:
+        return
+
+    from pptx.util import Inches
+    from pptx.enum.text import MSO_ANCHOR
+
+    EMU_PER_IN = 914400
+    q_len = len(question)
+    if q_len < LONG_MCQ_QUESTION_THRESHOLD:
+        return
+
+    q_width_in = question_shape.width / EMU_PER_IN
+
+    # A/R questions like the screenshot need smaller text and a taller question
+    # area. Normal MCQs never enter this branch, so the template look is kept.
+    q_font = (
+        LONG_MCQ_QUESTION_FONT_PT
+        if q_len < VERY_LONG_MCQ_QUESTION_THRESHOLD
+        else VERY_LONG_MCQ_QUESTION_FONT_PT
+    )
+    lines = _estimated_wrapped_lines(question, q_font, q_width_in)
+    needed_q_h = min(
+        max(lines * q_font * 1.22 / 72.0 + 0.35, 2.6),
+        LONG_MCQ_MAX_QUESTION_HEIGHT_IN,
+    )
+
+    question_shape.height = Inches(needed_q_h)
+    question_shape.text_frame.word_wrap = True
+    question_shape.text_frame.vertical_anchor = MSO_ANCHOR.TOP
+    _set_textbox_font_size(question_shape, q_font)
+
+    first_option_top = min(s.top for s in option_shapes)
+    desired_option_top = question_shape.top + question_shape.height + Inches(0.35)
+    shift = max(0, desired_option_top - first_option_top)
+    if shift <= 0:
+        return
+
+    # Move the whole option band, not only the text placeholders. This keeps the
+    # teal A/B/C/D badges aligned with their option text.
+    band_top = first_option_top - Inches(0.80)
+    band_bottom = Inches(19.8)
+    max_shift = max(0, band_bottom - max(s.top + s.height for s in option_shapes))
+    shift = min(shift, max_shift)
+    if shift <= 0:
+        return
+
+    for shape in slide.shapes:
+        if shape.top is None or shape.height is None:
+            continue
+        if band_top <= shape.top <= band_bottom:
+            # Keep footer/logo/top question area untouched; option labels and
+            # option text all live in this vertical band.
+            shape.top = shape.top + shift
+
+
+def _apply_long_vertical_mcq_options_layout(slide, option_shapes, options) -> None:
+    """
+    For vertical MCQs whose options are long (one or more options wrap to a 3rd
+    line at the template width), widen the option boxes a little and re-flow them
+    vertically so each option gets the room it needs without colliding with the
+    next one. Short options are left exactly as the template has them.
+
+    The A/B/C/D teal badges live as separate shapes to the LEFT of each option
+    text box, so when an option moves we move its badge by the same amount to
+    keep them aligned.
+    """
+    if not option_shapes or not options:
+        return
+
+    from pptx.util import Inches
+    from pptx.enum.text import MSO_ANCHOR
+
+    EMU_PER_IN = 914400
+    shapes = sorted(option_shapes, key=lambda s: s.top)[: len(options)]
+    texts = [t for t in options][: len(shapes)]
+    if not shapes:
+        return
+
+    # Trigger: only adapt when an option is long at the DEFAULT template width.
+    max_lines_default = max(
+        _estimated_wrapped_lines(t, MCQ_OPTION_FONT_PT, MCQ_OPTION_DEFAULT_WIDTH_IN)
+        for t in texts
+    )
+    if max_lines_default < MCQ_OPTION_TRIGGER_LINES:
+        return  # short options → keep the exact template layout
+
+    first_top_in = shapes[0].top / EMU_PER_IN
+
+    def plan(font_pt: int, width_in: float):
+        line_h = font_pt * MCQ_OPTION_LINE_HEIGHT_FACTOR / 72.0
+        lines = [_estimated_wrapped_lines(t, font_pt, width_in) for t in texts]
+        heights = [max(1.0, n * line_h) for n in lines]
+        tops = [first_top_in]
+        for i in range(1, len(shapes)):
+            tops.append(tops[i - 1] + heights[i - 1] + MCQ_OPTION_GAP_IN)
+        bottom = tops[-1] + heights[-1]
+        return tops, heights, bottom
+
+    font_pt = MCQ_OPTION_FONT_PT
+    width_in = MCQ_OPTION_WIDENED_WIDTH_IN
+    tops, heights, bottom = plan(font_pt, width_in)
+
+    # Last resort only: if the reflow runs off the slide, shrink the font a bit.
+    while bottom > MCQ_OPTION_BAND_BOTTOM_IN and font_pt > MCQ_OPTION_MIN_FONT_PT:
+        font_pt -= 2
+        tops, heights, bottom = plan(font_pt, width_in)
+
+    old_tops = [s.top for s in shapes]
+    min_left = min(s.left for s in shapes)
+
+    # Assign each badge (circle + letter, which sit to the LEFT of the options)
+    # to its option by ORIGINAL top BEFORE moving anything. Doing the matching
+    # up front avoids double-moving a badge that drifts into a later option's
+    # window once options with big deltas slide downward.
+    badge_assignment = []  # (badge_shape, option_index)
+    tol = Inches(1.2)
+    for other in slide.shapes:
+        if other in shapes or other.top is None or other.left is None:
+            continue
+        if other.left >= min_left:
+            continue
+        nearest = min(range(len(shapes)), key=lambda i: abs(other.top - old_tops[i]))
+        if abs(other.top - old_tops[nearest]) <= tol:
+            badge_assignment.append((other, nearest))
+
+    deltas = []
+    for i, sh in enumerate(shapes):
+        new_top = int(round(tops[i] * EMU_PER_IN))
+        deltas.append(new_top - old_tops[i])
+        sh.width = Inches(width_in)
+        sh.height = Inches(heights[i])
+        sh.text_frame.word_wrap = True
+        sh.text_frame.vertical_anchor = MSO_ANCHOR.TOP
+        if font_pt != MCQ_OPTION_FONT_PT:
+            _set_textbox_font_size(sh, font_pt)
+        sh.top = new_top
+
+    for badge, idx in badge_assignment:
+        if deltas[idx]:
+            badge.top = badge.top + deltas[idx]
+
+
 def _fill_mcq(slide, content: SlideContent, is_grid: bool = False):
     q = _strip_question_prefix(content.title)
     q = _sanitize_question_title(q)
+    question_shapes = _shapes_with_text(slide, "Type question here")
+    option_shapes = _shapes_with_text(slide, "Type option here")
+
     _replace_first(slide, "Type question here", q)
     opts = [_strip_option_prefix(b) for b in content.bullets[:4]]
 
@@ -1830,6 +2041,14 @@ def _fill_mcq(slide, content: SlideContent, is_grid: bool = False):
         )
     else:
         _replace_sequence(slide, "Type option here", opts)
+        if question_shapes:
+            vertical_option_shapes = sorted(option_shapes, key=lambda s: (s.top, s.left))
+            _apply_long_vertical_mcq_layout(
+                slide, question_shapes[0], vertical_option_shapes, q
+            )
+        # After the question band is placed, give long options more width and
+        # vertical spacing (only when an option wraps to a 3rd line).
+        _apply_long_vertical_mcq_options_layout(slide, option_shapes, opts)
 
     _clear_unused_placeholders(slide)
 
@@ -2033,7 +2252,7 @@ def _set_notes(slide, text):
 # Router — pick the right filler for each layout
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _apply_content(slide, content: SlideContent, context: PDFContext):
+def _apply_content(slide, content: SlideContent, context: PDFContext, strategy=None):
     t = content.layout
     if t == TemplateType.title_slide:
         _fill_title_slide(slide, content, context)
@@ -2045,13 +2264,13 @@ def _apply_content(slide, content: SlideContent, context: PDFContext):
         _fill_section_heading(slide, content)
     elif t == TemplateType.theory_slide:
         # theory uses the new yellow-tag + arrow-bullets layout on a blank base
-        _fill_theory_slide(slide, content)
+        _fill_theory_slide(slide, content, strategy)
     elif t == TemplateType.table_slide:
         # table-only — yellow caption tag at top, real pptx table fills the body
         _fill_table_slide(slide, content)
     elif t == TemplateType.theory_table_slide:
         # short theory bullets above + table below, non-overlapping
-        _fill_theory_table_slide(slide, content)
+        _fill_theory_table_slide(slide, content, strategy)
     elif t == TemplateType.passage_slide:
         # cloze/comprehension passage — yellow directions banner + verbatim text
         _fill_passage_slide(slide, content)
@@ -2130,7 +2349,8 @@ def _fill_first_text(slide, old, new):
 def generate_pptx(
     all_slide_contents: list[SlideContent],
     context: PDFContext,
-    filename: str = "output.pptx"
+    filename: str = "output.pptx",
+    strategy=None,
 ) -> str:
     """
     Build the final deck by cloning slides from the reference template and
@@ -2155,7 +2375,7 @@ def generate_pptx(
 
         try:
             new_slide = _clone_slide(prs, prs.slides[src_idx])
-            _apply_content(new_slide, content, context)
+            _apply_content(new_slide, content, context, strategy)
             _remove_explicit_top_left_logo(new_slide)
             _add_top_right_badge(new_slide)
             _apply_devanagari_fonts(new_slide)

@@ -21,8 +21,8 @@ from schemas.extracted_page import ExtractedPage
 from schemas.slide_plan   import FullSlidePlan
 from schemas.plan_review  import PlanReview
 from schemas.request      import PDFContext
-from config import CRITIC_MODEL
-from pipeline.token_tracker import record_usage
+from config import PLAN_CRITIC_MODEL
+from pipeline.token_tracker import record_api_attempt, record_api_failure, record_usage
 
 
 def _build_critic_prompt(
@@ -122,16 +122,20 @@ def critique_plan(
         response_mime_type="application/json",
         response_schema=PlanReview,
     )
+    response = None
     try:
+        record_api_attempt("critics", PLAN_CRITIC_MODEL)
         response = client.models.generate_content(
-            model=CRITIC_MODEL,
+            model=PLAN_CRITIC_MODEL,
             contents=_build_critic_prompt(plan, extracted_pages, context),
             config=config,
         )
-        record_usage("critics", response.usage_metadata)
+        record_usage("critics", response.usage_metadata, model=PLAN_CRITIC_MODEL)
         review = response.parsed
         return review
     except Exception as e:
+        if response is None:
+            record_api_failure("critics", PLAN_CRITIC_MODEL)
         print(f"  Plan critic — failed ({e}); skipping review")
         return PlanReview(
             overall_ok=True,

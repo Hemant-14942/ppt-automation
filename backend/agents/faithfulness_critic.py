@@ -24,8 +24,13 @@ from schemas.slide_content   import SlideContent
 from schemas.slide_plan      import TemplateType
 from schemas.extracted_page  import ExtractedPage
 from schemas.faithfulness    import FaithfulnessReport, BulletVerdict
-from config import CRITIC_MODEL, MAX_CONCURRENT_AGENTS
-from pipeline.token_tracker import record_usage
+from config import (
+    SLIDE_CRITIC_MODEL,
+    FAITHFULNESS_PROGRESS_EVERY,
+    FAITHFULNESS_TIMEOUT_SECONDS,
+    MAX_CONCURRENT_AGENTS,
+)
+from pipeline.token_tracker import record_api_attempt, record_api_failure, record_usage
 
 
 # Layouts where there's nothing meaningful to fact-check
@@ -156,18 +161,26 @@ async def _check_one(
             response_mime_type="application/json",
             response_schema=FaithfulnessReport,
         )
+        response = None
         try:
-            response = await client.aio.models.generate_content(
-                model=CRITIC_MODEL,
-                contents=_build_prompt(slide, sources),
-                config=config,
+            record_api_attempt("critics", SLIDE_CRITIC_MODEL)
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=SLIDE_CRITIC_MODEL,
+                    contents=_build_prompt(slide, sources),
+                    config=config,
+                ),
+                timeout=FAITHFULNESS_TIMEOUT_SECONDS,
             )
-            record_usage("critics", response.usage_metadata)
+            record_usage("critics", response.usage_metadata, model=SLIDE_CRITIC_MODEL)
             report = response.parsed
             report.slide_number = slide.slide_number   # trust our numbering
             return report
         except Exception as e:
-            print(f"  Faithfulness — slide {slide.slide_number} skipped ({e})")
+            if response is None:
+                record_api_failure("critics", SLIDE_CRITIC_MODEL)
+            print(f"  Faithfulness — slide {slide.slide_number} skipped "
+                  f"[{type(e).__name__}]: {e!r}")
             return FaithfulnessReport(
                 slide_number=slide.slide_number,
                 bullet_verdicts=[],
@@ -196,17 +209,31 @@ async def check_faithfulness(
     }
 
     sem = asyncio.Semaphore(MAX_CONCURRENT_AGENTS)
+
+    async def _run_one(idx: int, content: SlideContent):
+        return idx, await _check_one(
+            content, sources_by_slide.get(content.slide_number, []), sem
+        )
+
     tasks = [
-        _check_one(c, sources_by_slide.get(c.slide_number, []), sem)
-        for c in contents
+        asyncio.create_task(_run_one(i, c))
+        for i, c in enumerate(contents)
     ]
-    print(f"  Faithfulness critic — checking {len(tasks)} slides in parallel...")
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    total = len(tasks)
+    print(f"  Faithfulness critic — checking {total} slides in parallel "
+          f"(max {MAX_CONCURRENT_AGENTS}, timeout {FAITHFULNESS_TIMEOUT_SECONDS}s)...")
 
     out: list[FaithfulnessReport] = []
-    for i, r in enumerate(results):
-        if isinstance(r, Exception):
-            print(f"  Faithfulness — slide {i + 1} errored: {r}")
+    done = 0
+    for task in asyncio.as_completed(tasks):
+        done += 1
+        try:
+            i, r = await task
+        except Exception as e:
+            # Hard fallback — should be rare because _check_one fail-opens.
+            i = min(done - 1, len(contents) - 1)
+            print(f"  Faithfulness — slide {contents[i].slide_number} errored "
+                  f"[{type(e).__name__}]: {e!r}")
             out.append(FaithfulnessReport(
                 slide_number=contents[i].slide_number,
                 bullet_verdicts=[],
@@ -216,6 +243,11 @@ async def check_faithfulness(
             ))
         else:
             out.append(r)
+
+        if done == total or done % FAITHFULNESS_PROGRESS_EVERY == 0:
+            print(f"  Faithfulness progress — {done}/{total} slides checked")
+
+    out.sort(key=lambda r: r.slide_number)
     return out
 
 

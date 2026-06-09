@@ -17,7 +17,15 @@ outputs/
 backend/uploads/
 backend/outputs/
 
+# Local-only smoke-test deps installed via pip --target (never deploy)
+.smoke_deps/
+backend/.smoke_deps/
+# Smoke-test artifacts
+backend/outputs/smoke_*
+
 # Frontend (see frontend/.gitignore for full list)
 frontend/node_modules/
 frontend/.next/
 frontend/out/
+
+docs/

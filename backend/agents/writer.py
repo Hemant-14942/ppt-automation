@@ -10,7 +10,7 @@ from schemas.slide_plan import FullSlidePlan, SlideOutline, TemplateType
 from schemas.slide_content import SlideContent
 from schemas.request import PDFContext
 from config import WRITING_MODEL, MAX_BULLETS, MAX_CONCURRENT_AGENTS
-from pipeline.token_tracker import record_usage
+from pipeline.token_tracker import record_api_attempt, record_api_failure, record_usage
 
 
 # ── AgentPayload — what every writer agent receives ──────────────────────────
@@ -541,13 +541,15 @@ async def _write_slide_async(
             response_schema=SlideContent
         )
 
+        response = None
         try:
+            record_api_attempt("writing", WRITING_MODEL)
             response = await client.aio.models.generate_content(
                 model=WRITING_MODEL,
                 contents=prompt,
                 config=config
             )
-            record_usage("writing", response.usage_metadata)
+            record_usage("writing", response.usage_metadata, model=WRITING_MODEL)
             slide = response.parsed
             limit = _max_bullets_for_layout(slide.layout)
             slide.bullets = slide.bullets[:limit]
@@ -570,6 +572,8 @@ async def _write_slide_async(
             return slide
 
         except Exception as e:
+            if response is None:
+                record_api_failure("writing", WRITING_MODEL)
             print(f"  Slide {payload.my_slide.slide_number} — failed ({e}), using fallback")
             s = payload.my_slide
             bullets = s.key_points[:_max_bullets_for_layout(s.template)]
@@ -748,8 +752,11 @@ def write_slide(
         response_schema=SlideContent
     )
 
+    response = None
     try:
+        record_api_attempt("writing", WRITING_MODEL)
         response = client.models.generate_content(model=WRITING_MODEL, contents=prompt, config=config)
+        record_usage("writing", response.usage_metadata, model=WRITING_MODEL)
         slide = response.parsed
         limit = _max_bullets_for_layout(slide.layout)
         slide.bullets = slide.bullets[:limit]
@@ -757,6 +764,8 @@ def write_slide(
             slide.bullets = _normalize_theory_bullets(slide.bullets)
         return slide
     except Exception:
+        if response is None:
+            record_api_failure("writing", WRITING_MODEL)
         bullets = slide_outline.key_points[:_max_bullets_for_layout(slide_outline.template)]
         if slide_outline.template in (TemplateType.theory_slide, TemplateType.theory_table_slide):
             bullets = _normalize_theory_bullets(bullets)

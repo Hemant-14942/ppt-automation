@@ -34,3 +34,5 @@ class GenerateResponse(BaseModel):
     total_pages:  Optional[int] = None
     total_slides: Optional[int] = None
     message:      Optional[str] = None
+    # Token usage / cost report (model-aware) for the frontend analytics view.
+    analytics:    Optional[dict] = None

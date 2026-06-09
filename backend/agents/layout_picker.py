@@ -26,8 +26,8 @@ from schemas.extracted_page import ExtractedPage
 from schemas.slide_plan   import FullSlidePlan, SlideOutline, TemplateType
 from schemas.plan_review  import LayoutSuggestion
 from schemas.request      import PDFContext
-from config import CRITIC_MODEL, MAX_CONCURRENT_AGENTS
-from pipeline.token_tracker import record_usage
+from config import LAYOUT_MODEL, MAX_CONCURRENT_AGENTS
+from pipeline.token_tracker import record_api_attempt, record_api_failure, record_usage
 
 
 # Slides whose layout is essentially fixed and should NOT be reviewed
@@ -163,20 +163,24 @@ async def _review_one(
             response_mime_type="application/json",
             response_schema=LayoutSuggestion,
         )
+        response = None
         try:
+            record_api_attempt("critics", LAYOUT_MODEL)
             response = await client.aio.models.generate_content(
-                model=CRITIC_MODEL,
+                model=LAYOUT_MODEL,
                 contents=_build_picker_prompt(
                     slide, sources, deck_size, neighbour_summaries
                 ),
                 config=config,
             )
-            record_usage("critics", response.usage_metadata)
+            record_usage("critics", response.usage_metadata, model=LAYOUT_MODEL)
             out = response.parsed
             out.slide_number = slide.slide_number
             out.current_layout = slide.template
             return out
         except Exception as e:
+            if response is None:
+                record_api_failure("critics", LAYOUT_MODEL)
             print(f"  Layout picker — slide {slide.slide_number} skipped ({e})")
             return LayoutSuggestion(
                 slide_number=slide.slide_number,

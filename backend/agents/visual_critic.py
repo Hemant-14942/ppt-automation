@@ -25,8 +25,8 @@ from schemas.slide_content import SlideContent
 from schemas.critic_report import SlideCritique
 from pipeline.pptx_to_pdf import convert_pptx_to_pdf
 from pipeline.pdf_loader import pdf_pages_to_png_bytes
-from config import CRITIC_MODEL, MAX_CONCURRENT_AGENTS, PDF_DPI
-from pipeline.token_tracker import record_usage
+from config import SLIDE_CRITIC_MODEL, MAX_CONCURRENT_AGENTS, PDF_DPI
+from pipeline.token_tracker import record_api_attempt, record_api_failure, record_usage
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -121,20 +121,24 @@ async def _critique_one(
             response_mime_type="application/json",
             response_schema=SlideCritique,
         )
+        response = None
         try:
+            record_api_attempt("critics", SLIDE_CRITIC_MODEL)
             response = await client.aio.models.generate_content(
-                model=CRITIC_MODEL,
+                model=SLIDE_CRITIC_MODEL,
                 contents=[
                     _critique_prompt(content),
                     types.Part.from_bytes(data=image_png, mime_type="image/png"),
                 ],
                 config=config,
             )
-            record_usage("critics", response.usage_metadata)
+            record_usage("critics", response.usage_metadata, model=SLIDE_CRITIC_MODEL)
             critique = response.parsed
             critique.slide_number = content.slide_number   # trust our numbering
             return critique
         except Exception as e:
+            if response is None:
+                record_api_failure("critics", SLIDE_CRITIC_MODEL)
             # Fail open — assume slide is fine; we don't want a critic glitch
             # to block the pipeline.
             print(f"  Visual critic — slide {content.slide_number} skipped ({e})")

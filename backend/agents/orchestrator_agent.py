@@ -19,7 +19,7 @@ from google.genai import types
 from agents.gemini_client import client
 from schemas.agent_state  import OrchestratorDecision, ToolName
 from config import ORCHESTRATOR_MODEL
-from pipeline.token_tracker import record_usage
+from pipeline.token_tracker import record_api_attempt, record_api_failure, record_usage
 
 
 # Tool catalogue shown to the LLM
@@ -116,10 +116,15 @@ async def decide_next_tool(state_summary: dict) -> OrchestratorDecision:
         response_mime_type="application/json",
         response_schema=OrchestratorDecision,
     )
-    response = await client.aio.models.generate_content(
-        model=ORCHESTRATOR_MODEL,
-        contents=_build_decision_prompt(state_summary),
-        config=config,
-    )
-    record_usage("planning", response.usage_metadata)
+    try:
+        record_api_attempt("planning", ORCHESTRATOR_MODEL)
+        response = await client.aio.models.generate_content(
+            model=ORCHESTRATOR_MODEL,
+            contents=_build_decision_prompt(state_summary),
+            config=config,
+        )
+    except Exception:
+        record_api_failure("planning", ORCHESTRATOR_MODEL)
+        raise
+    record_usage("planning", response.usage_metadata, model=ORCHESTRATOR_MODEL)
     return response.parsed

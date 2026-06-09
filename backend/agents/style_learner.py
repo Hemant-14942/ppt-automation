@@ -26,8 +26,8 @@ from google.genai import types
 
 from agents.gemini_client import client
 from schemas.run_record   import RunRecord, StyleUpdate
-from config import CRITIC_MODEL
-from pipeline.token_tracker import record_usage
+from config import PLAN_CRITIC_MODEL
+from pipeline.token_tracker import record_api_attempt, record_api_failure, record_usage
 
 
 def _build_learner_prompt(
@@ -145,16 +145,20 @@ def learn_from_runs(
         response_mime_type="application/json",
         response_schema=StyleUpdate,
     )
+    response = None
     try:
+        record_api_attempt("critics", PLAN_CRITIC_MODEL)
         response = client.models.generate_content(
-            model=CRITIC_MODEL,
+            model=PLAN_CRITIC_MODEL,
             contents=_build_learner_prompt(recent_runs, current_style),
             config=config,
         )
-        record_usage("critics", response.usage_metadata)
+        record_usage("critics", response.usage_metadata, model=PLAN_CRITIC_MODEL)
         update = response.parsed
         return update
     except Exception as e:
+        if response is None:
+            record_api_failure("critics", PLAN_CRITIC_MODEL)
         print(f"  Style learner failed ({e}); skipping")
         return StyleUpdate(new_hints=[], runs_analyzed=len(recent_runs),
                            summary=f"failed: {e}")

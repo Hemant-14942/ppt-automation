@@ -6,7 +6,7 @@ from schemas.extracted_page import ExtractedPage
 from schemas.slide_plan import FullSlidePlan
 from schemas.request import PDFContext
 from config import PLANNING_MODEL, MIN_SLIDES
-from pipeline.token_tracker import record_usage
+from pipeline.token_tracker import record_api_attempt, record_api_failure, record_usage
 
 
 # ── Annotation-driven "include" detection ────────────────────────────────────
@@ -573,12 +573,17 @@ def plan_slides(
             print(f"    Retry {attempt - 1}: body={actual_body}/{expected_min_body}, "
                   f"passages={actual_passages}/{expected_passages}. Re-planning...")
 
-        response = client.models.generate_content(
-            model=PLANNING_MODEL,
-            contents=current_prompt,
-            config=config
-        )
-        record_usage("planning", response.usage_metadata)
+        try:
+            record_api_attempt("planning", PLANNING_MODEL)
+            response = client.models.generate_content(
+                model=PLANNING_MODEL,
+                contents=current_prompt,
+                config=config
+            )
+        except Exception:
+            record_api_failure("planning", PLANNING_MODEL)
+            raise
+        record_usage("planning", response.usage_metadata, model=PLANNING_MODEL)
 
         try:
             plan = response.parsed

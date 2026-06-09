@@ -20,6 +20,7 @@ is unaffected.
 import os
 import yaml
 import time
+import traceback
 from pipeline.tools             import PipelineState, execute_tool
 from agents.orchestrator_agent  import decide_next_tool
 from pipeline.pdf_loader        import get_pdf_page_count
@@ -139,6 +140,12 @@ async def run_pipeline_agentic(pdf_path: str, context: PDFContext) -> dict:
     tracker.activate()
     pipeline_start = time.monotonic()
 
+    def _fail(message: str) -> dict:
+        elapsed = time.monotonic() - pipeline_start
+        print(f"\n  ERROR — Agentic pipeline failed: {message}")
+        print(tracker.summary(elapsed))
+        return {"status": "error", "message": message}
+
     state = PipelineState(
         pdf_path=pdf_path,
         context=context,
@@ -177,7 +184,12 @@ async def run_pipeline_agentic(pdf_path: str, context: PDFContext) -> dict:
 
         # ─── execute the tool ──────────────────────────────────────────
         print(f"  [step {step:2d}] {chosen.value:28s}  ← {reasoning[:90]}")
-        ok, note = await execute_tool(state, chosen, reasoning)
+        try:
+            ok, note = await execute_tool(state, chosen, reasoning)
+        except Exception as e:
+            print(f"  [step {step:2d}] tool crashed [{type(e).__name__}]: {e!r}")
+            traceback.print_exc()
+            return _fail(f"{chosen.value} crashed: {e}")
         print(f"           → {'ok' if ok else '✗'}  {note}")
 
         last_two.append(chosen)
@@ -187,15 +199,13 @@ async def run_pipeline_agentic(pdf_path: str, context: PDFContext) -> dict:
         if state.done:
             break
         if state.fatal_error:
-            return {"status": "error", "message": state.fatal_error}
+            return _fail(state.fatal_error)
         if not ok and chosen == ToolName.EXTRACT:
-            return {"status": "error",
-                    "message": f"extraction failed: {note}"}
+            return _fail(f"extraction failed: {note}")
 
     # ─── final summary ────────────────────────────────────────────────
     if not state.output_path:
-        return {"status": "error",
-                "message": "agentic loop ended without producing pptx"}
+        return _fail("agentic loop ended without producing pptx")
 
     print(f"\n{'='*52}")
     print(f"  Agentic pipeline complete in {len(state.history)} step(s)")
@@ -213,4 +223,5 @@ async def run_pipeline_agentic(pdf_path: str, context: PDFContext) -> dict:
         "message":      None,
         "steps":        len(state.history),
         "agentic":      True,
+        "analytics":    tracker.report_dict(elapsed),
     }

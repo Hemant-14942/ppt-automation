@@ -2,18 +2,26 @@
 
 import { GenerateResponse } from "@/types";
 import { getDownloadURL, getPdfDownloadURL } from "@/lib/api";
-import { Download, FileSliders, RotateCcw, Sparkles } from "lucide-react";
+import {
+  Download,
+  FileSliders,
+  RotateCcw,
+  Sparkles,
+  BarChart3,
+} from "lucide-react";
 
 interface DownloadCardProps {
   result: GenerateResponse;
   previewAvailable: boolean;
   onReset: () => void;
+  onShowAnalytics?: () => void;
 }
 
 export default function DownloadCard({
   result,
   previewAvailable,
   onReset,
+  onShowAnalytics,
 }: DownloadCardProps) {
   const downloadURL =
     result.download_url ??
@@ -92,6 +100,15 @@ export default function DownloadCard({
             <Download className="h-4 w-4" />
             Download .pdf
           </a>
+        )}
+        {onShowAnalytics && result.analytics && (
+          <button
+            onClick={onShowAnalytics}
+            className="flex w-full items-center justify-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-5 py-3 text-sm font-semibold text-emerald-100 transition-all hover:bg-emerald-500/15 active:scale-[0.98]"
+          >
+            <BarChart3 className="h-4 w-4" />
+            Show Analytics
+          </button>
         )}
         <button
           onClick={onReset}

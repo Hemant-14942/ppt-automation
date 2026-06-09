@@ -13,6 +13,7 @@ import ContextForm from "@/components/ContextForm";
 import ProcessFlow from "@/components/ProcessFlow";
 import DownloadCard from "@/components/DownloadCard";
 import PreviewPane from "@/components/PreviewPane";
+import AnalyticsModal from "@/components/AnalyticsModal";
 import { generatePPT, checkHealth } from "@/lib/api";
 import { Presentation, ChevronRight, AlertTriangle, Wifi, WifiOff } from "lucide-react";
 
@@ -75,6 +76,7 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [serverOnline, setServerOnline] = useState<boolean | null>(null);
   const [previewAvailable, setPreviewAvailable] = useState(false);
+  const [showAnalytics, setShowAnalytics] = useState(false);
 
   // ── health check ─────────────────────────────────────
   useEffect(() => {
@@ -179,6 +181,7 @@ export default function Home() {
     setContext(DEFAULT_CONTEXT);
     setResult(null);
     setError(null);
+    setShowAnalytics(false);
     setPipelineSteps(PIPELINE_STEPS.map((s) => ({ ...s, status: "waiting" })));
   };
 
@@ -382,6 +385,7 @@ export default function Home() {
                   result={result}
                   previewAvailable={previewAvailable}
                   onReset={handleReset}
+                  onShowAnalytics={() => setShowAnalytics(true)}
                 />
                 {previewAvailable && result.filename && (
                   <PreviewPane
@@ -399,6 +403,14 @@ export default function Home() {
           Powered by Gemini AI · Physics Wallah DPT Tool
         </p>
       </main>
+
+      {/* Analytics modal */}
+      {showAnalytics && result?.analytics && (
+        <AnalyticsModal
+          analytics={result.analytics}
+          onClose={() => setShowAnalytics(false)}
+        />
+      )}
     </div>
   );
 }

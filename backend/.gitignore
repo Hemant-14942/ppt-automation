@@ -152,3 +152,8 @@ backend/uploads/
 backend/outputs/
 uploads/
 outputs/
+
+# Local-only smoke-test deps installed via pip --target (never deploy)
+.smoke_deps/
+# Smoke-test artifacts
+outputs/smoke_*

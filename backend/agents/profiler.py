@@ -23,7 +23,7 @@ from schemas.extracted_page import ExtractedPage
 from schemas.deck_strategy  import DeckStrategy
 from schemas.request        import PDFContext
 from config import PROFILER_MODEL
-from pipeline.token_tracker import record_usage
+from pipeline.token_tracker import record_api_attempt, record_api_failure, record_usage
 
 
 def _content_signals(extracted_pages: list[ExtractedPage]) -> dict:
@@ -153,15 +153,19 @@ def profile_deck(
         response_mime_type="application/json",
         response_schema=DeckStrategy,
     )
+    response = None
     try:
+        record_api_attempt("planning", PROFILER_MODEL)
         response = client.models.generate_content(
             model=PROFILER_MODEL,
             contents=_build_profiler_prompt(extracted_pages, context, prior),
             config=config,
         )
-        record_usage("planning", response.usage_metadata)
+        record_usage("planning", response.usage_metadata, model=PROFILER_MODEL)
         return response.parsed
     except Exception as e:
+        if response is None:
+            record_api_failure("planning", PROFILER_MODEL)
         print(f"  Profiler failed ({e}); using balanced defaults")
         return DeckStrategy.default()
 

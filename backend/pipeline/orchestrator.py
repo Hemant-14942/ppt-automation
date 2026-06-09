@@ -1,6 +1,7 @@
 import os
 import asyncio
 import time
+import traceback
 import yaml
 from pipeline.pdf_loader import pdf_to_base64_images, get_pdf_page_count
 from agents.extractor import extract_all_pages_async
@@ -96,7 +97,7 @@ async def _run_visual_critique_loop(
         slide_contents, _ = label_continuation_titles(slide_contents)
         print(render_reflow_report(reflow_log))
         slide_contents = auto_fix(slide_contents, run_qc(slide_contents))
-        output_path = generate_pptx(slide_contents, context, output_filename)
+        output_path = generate_pptx(slide_contents, context, output_filename, strategy)
         rounds_done += 1
 
         # numbers changed → must re-critique the whole deck
@@ -146,7 +147,7 @@ async def _run_visual_critique_loop(
             strategy,
         )
         slide_contents = auto_fix(slide_contents, run_qc(slide_contents))
-        output_path = generate_pptx(slide_contents, context, output_filename)
+        output_path = generate_pptx(slide_contents, context, output_filename, strategy)
         rounds_done += 1
 
         print(f"STEP 7.B{attempt}b — Visual re-check ({len(pending)} slide(s))...")
@@ -254,7 +255,8 @@ async def _background_telemetry(
             for line in applied:
                 print(f"    - {line}")
     except Exception as e:
-        print(f"  [bg] Telemetry / learner skipped ({e})")
+        print(f"  [bg] Telemetry / learner skipped [{type(e).__name__}]: {e!r}")
+        traceback.print_exc()
     finally:
         if tracker and usage_snapshot is not None and started_at is not None:
             elapsed = time.monotonic() - started_at
@@ -452,7 +454,7 @@ async def _run_linear_pipeline(pdf_path: str, context: PDFContext) -> dict:
 
         # ── STEP 6: Generate PPTX ────────────────────────────
         print("STEP 6 — Generating PowerPoint file...")
-        output_path = generate_pptx(all_slide_contents, context, output_filename)
+        output_path = generate_pptx(all_slide_contents, context, output_filename, strategy)
         print()
 
         # ── STEP 7: Visual critique + auto-retry loop ─────────
@@ -515,9 +517,13 @@ async def _run_linear_pipeline(pdf_path: str, context: PDFContext) -> dict:
             "filename":     output_filename,
             "total_pages":  page_count,
             "total_slides": slide_plan.total_slides,
-            "message":      None
+            "message":      None,
+            "analytics":    tracker.report_dict(elapsed),
         }
 
     except Exception as e:
-        print(f"\n  ERROR — Pipeline failed: {e}")
+        elapsed = time.monotonic() - pipeline_start
+        print(f"\n  ERROR — Pipeline failed [{type(e).__name__}]: {e!r}")
+        traceback.print_exc()
+        print(tracker.summary(elapsed))
         return {"status": "error", "message": str(e)}
