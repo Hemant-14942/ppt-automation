@@ -50,7 +50,8 @@ def _next_legal_tool(state: PipelineState) -> ToolName:
     if not s["planned"]:                   return ToolName.PLAN
     if not s["layout_reviewed"]:           return ToolName.REVIEW_LAYOUTS
     if not s["plan_reviewed"]:             return ToolName.CRITIQUE_PLAN
-    if s["n_layout_overrides"] or s["n_plan_fixes"]:
+    if (s["n_layout_overrides"] or s["n_plan_fixes"]) \
+            and not s["plan_fixes_applied"] and not s["written"]:
         return ToolName.APPLY_PLAN_FIXES
     if not s["written"]:                   return ToolName.WRITE
     if not s["faithfulness_checked"]:      return ToolName.CHECK_FAITHFULNESS
@@ -81,6 +82,11 @@ def _is_legal(state: PipelineState, tool: ToolName) -> bool:
         return False
     if tool in {ToolName.REVIEW_LAYOUTS, ToolName.CRITIQUE_PLAN,
                 ToolName.APPLY_PLAN_FIXES, ToolName.WRITE} and not s["planned"]:
+        return False
+    # Plan fixes are a ONE-TIME step. Re-applying mutates the plan again and
+    # invalidates the written slides → a full, costly re-write. Block it once
+    # it has run, or once slides already exist.
+    if tool == ToolName.APPLY_PLAN_FIXES and (s["plan_fixes_applied"] or s["written"]):
         return False
     if tool in {ToolName.CHECK_FAITHFULNESS, ToolName.APPLY_FAITHFULNESS,
                 ToolName.GENERATE_PPTX} and not s["written"]:

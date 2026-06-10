@@ -1874,6 +1874,25 @@ MCQ_OPTION_LINE_HEIGHT_FACTOR = 1.2   # line height multiple (leave as is)
 MCQ_OPTION_BAND_BOTTOM_IN   = 21.2    # keep options above this line
 MCQ_OPTION_MIN_FONT_PT      = 44      # last-resort shrink floor
 
+# ── Long-stem MCQ → 2-column option grid (slide-19 type) ─────────────────────
+# When a *vertical* MCQ has a stem so long that 4 stacked options would collide
+# with it, AND all four options are short enough to live in a half-width column,
+# lay the options out as a 2x2 grid just below the stem:
+#       A   B
+#       C   D
+# This halves the vertical room the options need, so everything stays on ONE
+# slide. It is deliberately conservative — it only fires for genuinely long
+# stems (>= MCQ_GRID_MIN_QUESTION_LINES wrapped lines). Normal vertical MCQs,
+# A/R questions, grids and PYQ slides are untouched.
+MCQ_GRID_QUESTION_THRESHOLD   = LONG_MCQ_QUESTION_THRESHOLD  # min stem chars (170)
+MCQ_GRID_MIN_QUESTION_LINES   = 5     # only when the stem wraps to >= this many lines
+MCQ_GRID_OPTION_MAX_LINES     = 2     # every option must fit <= this many lines (half width)
+MCQ_GRID_MAX_QUESTION_HEIGHT_IN = 11.0  # let the long stem be this tall (uncapped vs vertical)
+MCQ_GRID_TOP_GAP_IN           = 0.5   # gap between stem bottom and first option row
+MCQ_GRID_ROW_GAP_IN           = 0.6   # gap between the two option rows
+MCQ_GRID_COL_GUTTER_IN        = 0.6   # gap between the left/right columns
+MCQ_GRID_BAND_BOTTOM_IN       = 21.2  # keep the bottom option row above this line
+
 
 def _apply_long_vertical_mcq_layout(slide, question_shape, option_shapes, question: str) -> None:
     """
@@ -1968,11 +1987,40 @@ def _apply_long_vertical_mcq_options_layout(slide, option_shapes, options) -> No
         return  # short options → keep the exact template layout
 
     first_top_in = shapes[0].top / EMU_PER_IN
+    min_left = min(s.left for s in shapes)
+    old_tops = [s.top for s in shapes]
+
+    # Assign each teal A/B/C/D badge (and any per-option pill) to its option by
+    # ORIGINAL top BEFORE moving anything. Matching by top-proximity means the
+    # tall question text box — which also sits to the LEFT of the options but
+    # far ABOVE them — is never mistaken for a badge. Doing the matching up front
+    # also avoids double-moving a badge that drifts into a later option's window
+    # once options with big deltas slide downward.
+    badge_assignment = []  # (badge_shape, option_index)
+    tol = Inches(1.2)
+    for other in slide.shapes:
+        if other in shapes or other.top is None or other.left is None:
+            continue
+        if other.left >= min_left:
+            continue
+        nearest = min(range(len(shapes)), key=lambda i: abs(other.top - old_tops[i]))
+        if abs(other.top - old_tops[nearest]) <= tol:
+            badge_assignment.append((other, nearest))
+
+    # Floor every row to at least the badge height (+ a little) so two badges
+    # never pack tighter than their own diameter and visually overlap. Derive
+    # this ONLY from the matched badges — NOT every left-side shape — so the
+    # (tall, resized) question box can't inflate the floor and push the options
+    # clean off the bottom of the slide.
+    badge_heights_in = [
+        b.height / EMU_PER_IN for b, _ in badge_assignment if b.height is not None
+    ]
+    min_row_in = max(1.0, (max(badge_heights_in) if badge_heights_in else 0.0) + 0.15)
 
     def plan(font_pt: int, width_in: float):
         line_h = font_pt * MCQ_OPTION_LINE_HEIGHT_FACTOR / 72.0
         lines = [_estimated_wrapped_lines(t, font_pt, width_in) for t in texts]
-        heights = [max(1.0, n * line_h) for n in lines]
+        heights = [max(min_row_in, n * line_h) for n in lines]
         tops = [first_top_in]
         for i in range(1, len(shapes)):
             tops.append(tops[i - 1] + heights[i - 1] + MCQ_OPTION_GAP_IN)
@@ -1987,24 +2035,6 @@ def _apply_long_vertical_mcq_options_layout(slide, option_shapes, options) -> No
     while bottom > MCQ_OPTION_BAND_BOTTOM_IN and font_pt > MCQ_OPTION_MIN_FONT_PT:
         font_pt -= 2
         tops, heights, bottom = plan(font_pt, width_in)
-
-    old_tops = [s.top for s in shapes]
-    min_left = min(s.left for s in shapes)
-
-    # Assign each badge (circle + letter, which sit to the LEFT of the options)
-    # to its option by ORIGINAL top BEFORE moving anything. Doing the matching
-    # up front avoids double-moving a badge that drifts into a later option's
-    # window once options with big deltas slide downward.
-    badge_assignment = []  # (badge_shape, option_index)
-    tol = Inches(1.2)
-    for other in slide.shapes:
-        if other in shapes or other.top is None or other.left is None:
-            continue
-        if other.left >= min_left:
-            continue
-        nearest = min(range(len(shapes)), key=lambda i: abs(other.top - old_tops[i]))
-        if abs(other.top - old_tops[nearest]) <= tol:
-            badge_assignment.append((other, nearest))
 
     deltas = []
     for i, sh in enumerate(shapes):
@@ -2021,6 +2051,149 @@ def _apply_long_vertical_mcq_options_layout(slide, option_shapes, options) -> No
     for badge, idx in badge_assignment:
         if deltas[idx]:
             badge.top = badge.top + deltas[idx]
+
+
+def _apply_long_mcq_grid_layout(slide, question_shape, option_shapes, question, options) -> bool:
+    """
+    Slide-19 type fallback: a *vertical* MCQ whose stem is so long that four
+    stacked options would collide with it. When that happens AND all four
+    options are short, lay the options out as a 2x2 grid right below the stem:
+
+            A   B
+            C   D
+
+    Returns True if the grid layout was applied (caller then skips the normal
+    vertical option reflow), False otherwise (caller keeps the vertical layout).
+
+    The teal A/B/C/D badges live as separate shapes to the LEFT of each option
+    text box, so each badge is translated by the same delta as its option.
+    """
+    if not question_shape or not option_shapes or len(option_shapes) < 4:
+        return False
+
+    from pptx.util import Inches
+    from pptx.enum.text import MSO_ANCHOR
+
+    EMU_PER_IN = 914400
+
+    # ── Trigger 1: stem must be genuinely long ──────────────────────────────
+    if len(question) < MCQ_GRID_QUESTION_THRESHOLD:
+        return False
+
+    q_font = (
+        LONG_MCQ_QUESTION_FONT_PT
+        if len(question) < VERY_LONG_MCQ_QUESTION_THRESHOLD
+        else VERY_LONG_MCQ_QUESTION_FONT_PT
+    )
+    q_left_in  = question_shape.left / EMU_PER_IN
+    q_top_in   = question_shape.top / EMU_PER_IN
+    q_width_in = question_shape.width / EMU_PER_IN
+    # Newline-aware: each numbered statement starts on its own line, so a hard
+    # break can't be packed onto the previous line. Sum per-segment wraps so we
+    # don't undercount (which would let the stem overflow into the first row).
+    stem_lines = sum(
+        _estimated_wrapped_lines(seg, q_font, q_width_in)
+        for seg in (question.split("\n") if "\n" in question else [question])
+    )
+    if stem_lines < MCQ_GRID_MIN_QUESTION_LINES:
+        return False
+
+    # ── Geometry of the two columns ─────────────────────────────────────────
+    shapes = sorted(option_shapes, key=lambda s: s.top)[:4]
+    texts  = [t for t in options][:4]
+    if len(shapes) < 4 or len(texts) < 4:
+        return False
+
+    text1_left_in = min(s.left for s in shapes) / EMU_PER_IN
+    col_shift_in  = q_width_in / 2.0
+    # Column text width: fill half the content band minus the badge gutter on the
+    # left and a small right margin, so neither column crosses the centre line.
+    text_width_in = max(
+        6.0,
+        q_width_in / 2.0 - (text1_left_in - q_left_in) - MCQ_GRID_COL_GUTTER_IN,
+    )
+
+    # ── Trigger 2: every option must fit the half-width column ──────────────
+    if any(
+        _estimated_wrapped_lines(t, MCQ_OPTION_FONT_PT, text_width_in)
+        > MCQ_GRID_OPTION_MAX_LINES
+        for t in texts
+    ):
+        return False  # long sentence options → grid won't help; keep vertical
+
+    # ── Resize the stem (uncapped vs vertical so options sit truly below) ───
+    needed_q_h = min(
+        max(stem_lines * q_font * 1.22 / 72.0 + 0.35, 2.6),
+        MCQ_GRID_MAX_QUESTION_HEIGHT_IN,
+    )
+    question_shape.height = Inches(needed_q_h)
+    question_shape.text_frame.word_wrap = True
+    question_shape.text_frame.vertical_anchor = MSO_ANCHOR.TOP
+    _set_textbox_font_size(question_shape, q_font)
+
+    # ── Match each badge to its option BEFORE moving anything ───────────────
+    # Badges are the small teal circles sitting just LEFT of each option text
+    # box. The (tall) question text box also sits to the left, so we match by
+    # top-proximity — its top is far from any option row and is excluded.
+    min_left  = min(s.left for s in shapes)
+    old_tops  = [s.top for s in shapes]
+    old_lefts = [s.left for s in shapes]
+    badge_assignment = []  # (badge_shape, option_index)
+    tol = Inches(1.2)
+    for other in slide.shapes:
+        if other in shapes or other.top is None or other.left is None:
+            continue
+        if other.left >= min_left:
+            continue
+        nearest = min(range(len(shapes)), key=lambda i: abs(other.top - old_tops[i]))
+        if abs(other.top - old_tops[nearest]) <= tol:
+            badge_assignment.append((other, nearest))
+
+    # ── Row heights (floored to the badge size so badges never overlap) ─────
+    badge_heights_in = [
+        b.height / EMU_PER_IN
+        for b, _ in badge_assignment
+        if b.height is not None
+    ]
+    min_row_in = max(1.0, (max(badge_heights_in) if badge_heights_in else 0.0) + 0.15)
+    line_h = MCQ_OPTION_FONT_PT * MCQ_OPTION_LINE_HEIGHT_FACTOR / 72.0
+
+    def opt_h(text: str) -> float:
+        n = _estimated_wrapped_lines(text, MCQ_OPTION_FONT_PT, text_width_in)
+        return max(min_row_in, n * line_h)
+
+    # A=idx0, B=idx1, C=idx2, D=idx3  →  grid (col, row)
+    grid_pos = {0: (0, 0), 1: (1, 0), 2: (0, 1), 3: (1, 1)}
+    row1_h = max(opt_h(texts[0]), opt_h(texts[1]))
+    row2_h = max(opt_h(texts[2]), opt_h(texts[3]))
+    row1_top_in = q_top_in + needed_q_h + MCQ_GRID_TOP_GAP_IN
+    row2_top_in = row1_top_in + row1_h + MCQ_GRID_ROW_GAP_IN
+
+    # ── Place the option text boxes ─────────────────────────────────────────
+    deltas = []  # (dleft_emu, dtop_emu) per option
+    for i, sh in enumerate(shapes):
+        col, row = grid_pos[i]
+        new_left_in = text1_left_in + (col_shift_in if col == 1 else 0.0)
+        new_top_in  = row1_top_in if row == 0 else row2_top_in
+        new_left = int(round(new_left_in * EMU_PER_IN))
+        new_top  = int(round(new_top_in * EMU_PER_IN))
+        deltas.append((new_left - old_lefts[i], new_top - old_tops[i]))
+        sh.left  = new_left
+        sh.top   = new_top
+        sh.width = Inches(text_width_in)
+        sh.height = Inches(row1_h if row == 0 else row2_h)
+        sh.text_frame.word_wrap = True
+        sh.text_frame.vertical_anchor = MSO_ANCHOR.TOP
+
+    # ── Translate each badge by the same delta as its option ────────────────
+    for badge, idx in badge_assignment:
+        dleft, dtop = deltas[idx]
+        if dleft:
+            badge.left = badge.left + dleft
+        if dtop:
+            badge.top = badge.top + dtop
+
+    return True
 
 
 def _fill_mcq(slide, content: SlideContent, is_grid: bool = False):
@@ -2041,14 +2214,23 @@ def _fill_mcq(slide, content: SlideContent, is_grid: bool = False):
         )
     else:
         _replace_sequence(slide, "Type option here", opts)
+        used_grid = False
         if question_shapes:
             vertical_option_shapes = sorted(option_shapes, key=lambda s: (s.top, s.left))
-            _apply_long_vertical_mcq_layout(
-                slide, question_shapes[0], vertical_option_shapes, q
+            # First try the 2-column grid fallback for very long stems with short
+            # options (slide-19 type). If it applies, it fully owns the option
+            # layout and we skip the vertical reflow below.
+            used_grid = _apply_long_mcq_grid_layout(
+                slide, question_shapes[0], vertical_option_shapes, q, opts
             )
+            if not used_grid:
+                _apply_long_vertical_mcq_layout(
+                    slide, question_shapes[0], vertical_option_shapes, q
+                )
         # After the question band is placed, give long options more width and
         # vertical spacing (only when an option wraps to a 3rd line).
-        _apply_long_vertical_mcq_options_layout(slide, option_shapes, opts)
+        if not used_grid:
+            _apply_long_vertical_mcq_options_layout(slide, option_shapes, opts)
 
     _clear_unused_placeholders(slide)
 

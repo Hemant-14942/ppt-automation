@@ -80,6 +80,7 @@ class PipelineState:
     # bookkeeping
     visual_retries:       int = 0
     visual_attempted:     bool = False     # true once visual_critique has run (even if skipped)
+    plan_fixes_applied:   bool = False     # true once apply_plan_fixes has run — never re-apply
     faithfulness_attempted: bool = False
     history:              list[ActionLog] = field(default_factory=list)
     done:                 bool = False
@@ -99,6 +100,7 @@ class PipelineState:
             ),
             "plan_reviewed":   self.plan_review is not None,
             "n_plan_fixes":    len(self.plan_review.fixes) if self.plan_review else 0,
+            "plan_fixes_applied": self.plan_fixes_applied,
             "written":         self.slide_contents is not None,
             "n_written":       len(self.slide_contents or []),
             "faithfulness_checked": self.faithfulness_attempted,
@@ -197,6 +199,10 @@ async def _t_apply_plan_fixes(state: PipelineState) -> str:
         state.slide_plan, state.layout_suggestions, review
     )
     state.slide_plan = new_plan
+    # Mark as applied so neither the LLM nor the linear fallback can re-apply
+    # the same fixes — re-applying mutates the plan again and forces a costly
+    # full re-write of every slide.
+    state.plan_fixes_applied = True
     return f"applied {len(log)} revision(s) → {new_plan.total_slides} slides"
 
 
