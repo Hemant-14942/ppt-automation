@@ -16,8 +16,8 @@ FRONTEND_ORIGINS = [
 
 # Models
 EXTRACTION_MODEL       = "gemini-3.5-flash"
-EXTRACTION_RETRY_MODEL = "gemini-3.1-pro"   # escalated model for the single retry attempt
-PLANNING_MODEL     = "gemini-3.1-pro"
+EXTRACTION_RETRY_MODEL = "gemini-3.1-pro-preview"   # escalated model for the single retry attempt
+PLANNING_MODEL     = "gemini-3.1-pro-preview"
 WRITING_MODEL      = "gemini-3.5-flash"
 CRITIC_MODEL       = "gemini-2.5-pro"    # legacy alias — prefer the 3 below
 
@@ -25,7 +25,7 @@ CRITIC_MODEL       = "gemini-2.5-pro"    # legacy alias — prefer the 3 below
 #   PLAN_CRITIC_MODEL  : one-shot, high-reasoning (plan structure, style)
 #   SLIDE_CRITIC_MODEL : per-slide faithfulness + visual checks
 #   LAYOUT_MODEL       : per-slide layout classification (simple task)
-PLAN_CRITIC_MODEL  = "gemini-3.1-pro"
+PLAN_CRITIC_MODEL  = "gemini-3.1-pro-preview"
 SLIDE_CRITIC_MODEL = "gemini-3.5-flash"
 LAYOUT_MODEL       = "gemini-3.5-flash"
 ORCHESTRATOR_MODEL = "gemini-2.5-flash"

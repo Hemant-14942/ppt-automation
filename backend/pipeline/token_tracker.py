@@ -32,22 +32,27 @@ _MODEL_PRICING_PER_1M = {
     "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
 }
 
-_PRO_MODEL_PREFIXES = (
-    "gemini-2.5-pro",
-    "gemini-3.1-pro",
-    "gemini-3-pro",
-)
-
 _FALLBACK_PRICING_PER_1M = {"input": 0.30, "output": 2.50}
+
+# Per-model Pro pricing (USD/1M tokens). Gemini 3.x Pro and 2.5 Pro have
+# different base rates; both double above 200k context.
+_PRO_PRICING: dict[str, dict[str, float]] = {
+    "gemini-3.1-pro": {"input": 2.00, "output": 12.00},   # matches both "gemini-3.1-pro" and "gemini-3.1-pro-preview"
+    "gemini-3-pro":   {"input": 2.00, "output": 12.00},
+    "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
+}
+_PRO_MODEL_PREFIXES = tuple(_PRO_PRICING.keys())
 
 
 def _pricing_for_model(model: str | None, prompt_tokens: int) -> dict[str, float]:
     """Return USD-per-1M pricing for the model, handling Pro tier thresholds."""
     m = (model or "unknown").strip()
-    if m.startswith(_PRO_MODEL_PREFIXES):
-        if prompt_tokens > 200_000:
-            return {"input": 2.50, "output": 15.00}
-        return {"input": 1.25, "output": 10.00}
+    for prefix, base_rates in _PRO_PRICING.items():
+        if m.startswith(prefix):
+            if prompt_tokens > 200_000:
+                # Long-context doubles input; output also increases
+                return {"input": base_rates["input"] * 2, "output": base_rates["output"] * 1.5}
+            return base_rates
     return _MODEL_PRICING_PER_1M.get(m, _FALLBACK_PRICING_PER_1M)
 
 
