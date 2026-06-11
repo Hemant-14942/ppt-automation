@@ -14,8 +14,15 @@ import ProcessFlow from "@/components/ProcessFlow";
 import DownloadCard from "@/components/DownloadCard";
 import PreviewPane from "@/components/PreviewPane";
 import AnalyticsModal from "@/components/AnalyticsModal";
-import { generatePPT, checkHealth } from "@/lib/api";
-import { Presentation, ChevronRight, AlertTriangle, Wifi, WifiOff } from "lucide-react";
+import { generatePPT, generatePPTFromUrl, checkHealth } from "@/lib/api";
+import {
+  Presentation,
+  ChevronRight,
+  AlertTriangle,
+  Wifi,
+  WifiOff,
+  Link as LinkIcon,
+} from "lucide-react";
 
 // ── pipeline step definitions ────────────────────────
 const PIPELINE_STEPS: Omit<PipelineStep, "status">[] = [
@@ -68,6 +75,7 @@ const DEFAULT_CONTEXT: PDFContext = {
 export default function Home() {
   const [step, setStep] = useState<AppStep>("upload");
   const [file, setFile] = useState<File | null>(null);
+  const [pdfUrl, setPdfUrl] = useState("");
   const [context, setContext] = useState<PDFContext>(DEFAULT_CONTEXT);
   const [pipelineSteps, setPipelineSteps] = useState<PipelineStep[]>(
     PIPELINE_STEPS.map((s) => ({ ...s, status: "waiting" }))
@@ -92,6 +100,8 @@ export default function Home() {
     context.batch.trim() &&
     context.class_level &&
     context.purpose;
+  const trimmedPdfUrl = pdfUrl.trim();
+  const hasPdfSource = Boolean(file || trimmedPdfUrl);
 
   // ── simulate step progression during API call ─────────
   const simulateProgress = useCallback(
@@ -127,13 +137,15 @@ export default function Home() {
 
   // ── start generation ──────────────────────────────────
   const handleGenerate = useCallback(async () => {
-    if (!file) return;
+    if (!file && !trimmedPdfUrl) return;
     setError(null);
     setStep("processing");
     setPipelineSteps(PIPELINE_STEPS.map((s) => ({ ...s, status: "waiting" })));
 
     // Fire API call + simulate progress in parallel
-    const apiPromise = generatePPT(file, context);
+    const apiPromise = file
+      ? generatePPT(file, context)
+      : generatePPTFromUrl(trimmedPdfUrl, context);
 
     let simulationDone = false;
     let apiDone = false;
@@ -172,12 +184,13 @@ export default function Home() {
         apiDone = true;
         tryFinish();
       });
-  }, [file, context, simulateProgress]);
+  }, [file, trimmedPdfUrl, context, simulateProgress]);
 
   // ── reset ────────────────────────────────────────────
   const handleReset = () => {
     setStep("upload");
     setFile(null);
+    setPdfUrl("");
     setContext(DEFAULT_CONTEXT);
     setResult(null);
     setError(null);
@@ -298,7 +311,7 @@ export default function Home() {
             {/* Error Banner */}
             {error && (
               <div className="mb-5 flex items-start gap-3 rounded-xl border border-red-500/20 bg-red-500/8 p-4">
-                <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-400" />
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
                 <div>
                   <p className="text-sm font-medium text-red-300">
                     Generation failed
@@ -313,11 +326,41 @@ export default function Home() {
               <div className="space-y-5">
                 <FileUpload
                   file={file}
-                  onFileSelect={setFile}
+                  onFileSelect={(selectedFile) => {
+                    setFile(selectedFile);
+                    setPdfUrl("");
+                  }}
                   onFileClear={() => setFile(null)}
                 />
+                <div className="relative">
+                  <div className="mb-3 flex items-center gap-3">
+                    <div className="h-px flex-1 bg-white/10" />
+                    <span className="text-xs font-medium uppercase tracking-[0.18em] text-zinc-600">
+                      or
+                    </span>
+                    <div className="h-px flex-1 bg-white/10" />
+                  </div>
+                  <label className="mb-2 block text-xs font-medium text-zinc-400">
+                    Paste public Google Drive PDF link
+                  </label>
+                  <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/3 px-4 py-3 transition-colors focus-within:border-violet-500/40">
+                    <LinkIcon className="h-4 w-4 shrink-0 text-zinc-500" />
+                    <input
+                      value={pdfUrl}
+                      onChange={(e) => {
+                        setPdfUrl(e.target.value);
+                        if (e.target.value.trim()) setFile(null);
+                      }}
+                      placeholder="https://drive.google.com/file/d/..."
+                      className="min-w-0 flex-1 bg-transparent text-sm text-white placeholder:text-zinc-600 focus:outline-none"
+                    />
+                  </div>
+                  <p className="mt-2 text-xs text-zinc-600">
+                    Drive file must be shared as &quot;Anyone with the link can view&quot;.
+                  </p>
+                </div>
                 <button
-                  disabled={!file}
+                  disabled={!hasPdfSource}
                   onClick={() => setStep("configure")}
                   className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 transition-all hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-30 active:scale-[0.98]"
                 >
@@ -335,7 +378,7 @@ export default function Home() {
                 {/* Backend offline warning */}
                 {serverOnline === false && (
                   <div className="flex items-center gap-2 rounded-xl border border-amber-500/20 bg-amber-500/8 px-4 py-3">
-                    <WifiOff className="h-4 w-4 text-amber-400 flex-shrink-0" />
+                    <WifiOff className="h-4 w-4 shrink-0 text-amber-400" />
                     <p className="text-xs text-amber-300">
                       Backend server is offline. Start it with{" "}
                       <code className="rounded bg-white/5 px-1 font-mono">
@@ -348,7 +391,7 @@ export default function Home() {
                 <div className="flex gap-3">
                   <button
                     onClick={() => setStep("upload")}
-                    className="flex items-center gap-1.5 rounded-xl border border-white/8 bg-white/[0.04] px-4 py-3 text-sm font-medium text-zinc-400 transition-all hover:bg-white/[0.08]"
+                    className="flex items-center gap-1.5 rounded-xl border border-white/8 bg-white/4 px-4 py-3 text-sm font-medium text-zinc-400 transition-all hover:bg-white/8"
                   >
                     Back
                   </button>
@@ -368,7 +411,7 @@ export default function Home() {
             {step === "processing" && (
               <ProcessFlow
                 steps={pipelineSteps}
-                fileName={file?.name ?? ""}
+                fileName={file?.name ?? "Google Drive PDF"}
               />
             )}
 

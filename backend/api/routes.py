@@ -1,5 +1,10 @@
+import asyncio
 import os
 import json
+import re
+from urllib.parse import parse_qs, urlparse
+
+import requests
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 from schemas.request import PDFContext, AnnotationItem, GenerateResponse
@@ -15,6 +20,150 @@ from storage.s3_storage import upload_file_to_s3, create_presigned_download_url
 
 
 router = APIRouter()
+
+MAX_DRIVE_PDF_BYTES = 50 * 1024 * 1024
+DRIVE_DOWNLOAD_TIMEOUT = 60
+
+
+def _parse_context(context_json: str) -> PDFContext:
+    try:
+        context_data = json.loads(context_json)
+        return PDFContext(**context_data)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid form data: {e}"
+        )
+
+
+def _extract_drive_file_id(pdf_url: str) -> str:
+    parsed = urlparse(pdf_url.strip())
+    hostname = (parsed.hostname or "").lower()
+
+    if hostname not in {"drive.google.com", "docs.google.com"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Only public Google Drive PDF links are supported"
+        )
+
+    match = re.search(r"/(?:file/d|document/d)/([^/]+)", parsed.path)
+    if match:
+        return match.group(1)
+
+    file_id = parse_qs(parsed.query).get("id", [None])[0]
+    if file_id:
+        return file_id
+
+    raise HTTPException(
+        status_code=400,
+        detail="Could not find a Google Drive file ID in the link"
+    )
+
+
+def _download_public_drive_pdf(pdf_url: str, pdf_path: str) -> None:
+    file_id = _extract_drive_file_id(pdf_url)
+    download_url = "https://drive.google.com/uc"
+    session = requests.Session()
+
+    try:
+        response = session.get(
+            download_url,
+            params={"export": "download", "id": file_id},
+            stream=True,
+            timeout=DRIVE_DOWNLOAD_TIMEOUT,
+        )
+        response.raise_for_status()
+
+        confirm_token = next(
+            (
+                value
+                for key, value in response.cookies.items()
+                if key.startswith("download_warning")
+            ),
+            None,
+        )
+
+        if confirm_token:
+            response.close()
+            response = session.get(
+                download_url,
+                params={"export": "download", "id": file_id, "confirm": confirm_token},
+                stream=True,
+                timeout=DRIVE_DOWNLOAD_TIMEOUT,
+            )
+            response.raise_for_status()
+
+        total = 0
+        first_chunk = b""
+        with open(pdf_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                if not first_chunk:
+                    first_chunk = chunk
+                total += len(chunk)
+                if total > MAX_DRIVE_PDF_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="PDF is too large. Maximum allowed size is 50MB"
+                    )
+                f.write(chunk)
+
+        if total == 0 or not first_chunk.lstrip().startswith(b"%PDF"):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Drive link did not return a PDF. Make sure the file is a "
+                    "public PDF shared as 'Anyone with the link can view'."
+                )
+            )
+    except HTTPException:
+        raise
+    except requests.RequestException as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not download PDF from Google Drive: {e}"
+        )
+
+
+async def _run_generation(pdf_path: str, context: PDFContext, job_id: str) -> GenerateResponse:
+    try:
+        result = await run_pipeline_async(pdf_path, context)
+
+        filename = result.get("filename")
+
+        if STORAGE_BACKEND == "s3" and result.get("status") == "success" and filename:
+            pptx_path = os.path.join(OUTPUT_DIR, filename)
+            s3_key = f"outputs/{job_id}/{filename}"
+
+            try:
+                upload_file_to_s3(
+                    local_path=pptx_path,
+                    s3_key=s3_key,
+                    content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                )
+                result["job_id"] = job_id
+                result["download_url"] = create_presigned_download_url(s3_key)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"PPT generated but S3 upload failed: {e}",
+                )
+
+            try:
+                os.remove(pptx_path)
+                print(f"  Cleaned up local PPT → {pptx_path}")
+            except Exception:
+                pass
+
+        return GenerateResponse(**result)
+    finally:
+        try:
+            os.remove(pdf_path)
+            print(f"  Cleaned up → {pdf_path}")
+        except Exception:
+            pass
+
 
 
 @router.post("/generate", response_model=GenerateResponse)
@@ -37,25 +186,14 @@ async def generate_ppt(
             detail="Only PDF files are accepted"
         )
 
-    # ── parse form context ──────────────────────────
-    try:
-        context_data = json.loads(context_json)
-        context = PDFContext(**context_data)
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid form data: {e}"
-        )
+    context = _parse_context(context_json)
 
     # ── save uploaded PDF temporarily ───────────────
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
     job_id = str(uuid.uuid4())
 
-    if STORAGE_BACKEND == "s3":
-        pdf_path = os.path.join(UPLOAD_DIR, f"{job_id}.pdf")
-    else:
-        pdf_path = os.path.join(UPLOAD_DIR, pdf_file.filename)
+    pdf_path = os.path.join(UPLOAD_DIR, f"{job_id}.pdf")
 
     with open(pdf_path, "wb") as f:
         content = await pdf_file.read()
@@ -63,45 +201,36 @@ async def generate_ppt(
 
     print(f"  PDF saved → {pdf_path}")
 
-    # ── run pipeline ────────────────────────────────
-    result = await run_pipeline_async(pdf_path, context)
+    return await _run_generation(pdf_path, context, job_id)
 
-    # ── upload generated PPT to S3 in production ─────
-    filename = result.get("filename")
 
-    if STORAGE_BACKEND == "s3" and result.get("status") == "success" and filename:
-        pptx_path = os.path.join(OUTPUT_DIR, filename)
-        s3_key = f"outputs/{job_id}/{filename}"
+@router.post("/generate-from-url", response_model=GenerateResponse)
+async def generate_ppt_from_url(
+    pdf_url: str = Form(...),
+    context_json: str = Form(...)
+):
+    """
+    Receives a public Google Drive PDF link + form context, downloads the PDF,
+    and runs the same generation pipeline as a normal upload.
+    """
+    context = _parse_context(context_json)
 
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    job_id = str(uuid.uuid4())
+    pdf_path = os.path.join(UPLOAD_DIR, f"{job_id}.pdf")
+
+    try:
+        await asyncio.to_thread(_download_public_drive_pdf, pdf_url, pdf_path)
+    except Exception:
         try:
-            upload_file_to_s3(
-                local_path=pptx_path,
-                s3_key=s3_key,
-                content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            )
-            result["job_id"] = job_id
-            result["download_url"] = create_presigned_download_url(s3_key)
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"PPT generated but S3 upload failed: {e}",
-            )
-
-        # ── cleanup local PPT ──────────────────────────
-        try:
-            os.remove(pptx_path)
-            print(f"  Cleaned up local PPT → {pptx_path}")
+            os.remove(pdf_path)
         except Exception:
             pass
-    # ── cleanup uploaded PDF ────────────────────────
-    try:
-        os.remove(pdf_path)
-        print(f"  Cleaned up → {pdf_path}")
-    except Exception:
-        pass  # not critical if cleanup fails
+        raise
 
-    # ── return result ───────────────────────────────
-    return GenerateResponse(**result)
+    print(f"  Drive PDF saved → {pdf_path}")
+
+    return await _run_generation(pdf_path, context, job_id)
 
 
 @router.get("/download/{filename}")

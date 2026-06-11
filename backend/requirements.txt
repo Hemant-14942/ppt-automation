@@ -5,8 +5,8 @@ pydantic
 python-dotenv
 google-genai
 python-pptx
-pdf2image
 Pillow
 pymupdf
 pyyaml
 boto3
+requests
